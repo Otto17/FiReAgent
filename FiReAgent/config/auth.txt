@@ -1,0 +1,14 @@
+# IP-адрес или домен сервера FiReMQ (TCP)
+ServerURL=
+
+# TCP порт MQTT брокера (mTLS)
+PortMQTT=8883
+
+# Логин для подключения к MQTT брокеру
+LoginMQTT=
+
+# Пароль для подключения к MQTT брокеру
+PasswordMQTT=
+
+# UDP порт для подключения к QUIC-серверу (mTLS)
+PortQUIC=4242

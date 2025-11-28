@@ -1,9 +1,9 @@
 module ClientUpdater
 
-go 1.25.3
+go 1.25.4
 
 require (
 	github.com/pelletier/go-toml/v2 v2.2.4
-	golang.org/x/sys v0.37.0
-	golang.org/x/text v0.30.0
+	golang.org/x/sys v0.38.0
+	golang.org/x/text v0.31.0
 )

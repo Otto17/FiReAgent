@@ -18,19 +18,35 @@ import (
 const (
 	// Данные для "Удаление или изменение программы" (Установленные приложения)
 	publisher      = "Otto"     // Автор
-	CurrentVersion = "01.11.25" // Текущая версия InstFiReAgent в формате "дд.мм.гг"
+	CurrentVersion = "26.11.25" // Текущая версия InstFiReAgent в формате "дд.мм.гг"
 )
 
 func main() {
+	initColors() // initColors Инициализирует цвета консоли (включает поддержку на Windows 10+)
+
+	// Показывает справку
+	if len(os.Args) >= 2 && (os.Args[1] == "?" || strings.EqualFold(os.Args[1], "-h") || strings.EqualFold(os.Args[1], "--help")) {
+		printHelp()
+		return
+	}
+
 	// Отображает версию InstFiReAgent
 	if len(os.Args) >= 2 && strings.EqualFold(os.Args[1], "--version") {
 		fmt.Printf("Версия \"InstFiReAgent\": %s\n", CurrentVersion)
 		return
 	}
 
-	initColors() // initColors Инициализирует цвета консоли (включает поддержку на Windows 10+)
+	// Проверяет, что все переданные аргументы являются допустимыми флагами
+	for _, arg := range os.Args[1:] {
+		if !strings.EqualFold(arg, "--force") && !strings.EqualFold(arg, "--del") {
+			fmt.Printf(ColorBrightRed+"Ошибка: Неизвестный ключ запуска \"%s\""+ColorReset+"\n", arg)
+			printHelp()
+			os.Exit(1)
+		}
+	}
 
 	force := hasForceFlag() // force Проверяет наличие ключа --force
+	del := hasDelFlag()     // del Проверяет наличие ключа --del
 
 	fmt.Println(ColorBrightYellow + "Автор " + publisher + " (ver." + CurrentVersion + ")" + ColorReset)
 	fmt.Println(ColorTeal + "Cсылка на проект: https://gitflic.ru/project/otto/fireagent" + ColorReset + "\n\n")
@@ -126,11 +142,20 @@ func main() {
 	}
 
 	// Удаляет временные файлы
-	if err := os.RemoveAll(tempDir); err != nil {
-		fmt.Fprintf(os.Stderr, ColorBrightYellow+
-			"Не удалось удалить временную папку напрямую (%v). Удаление произойдёт после завершения установки...\n"+ColorReset, err)
-		// fallback: создаём cmd.exe для удаления после выхода
-		scheduleTempDelete(tempDir)
+	// Попытка удалить папку сразу
+	removeTempErr := os.RemoveAll(tempDir)
+
+	// Если удаление папки не удалось ИЛИ включен флаг --del, запускает отложенную задачу
+	if removeTempErr != nil || del {
+		if removeTempErr != nil {
+			fmt.Fprintf(os.Stderr, ColorBrightYellow+
+				"Не удалось удалить временную папку напрямую (%v). Удаление произойдёт после завершения установки...\n"+ColorReset, removeTempErr)
+		}
+		if del {
+			fmt.Println(ColorPink + "Активировано самоудаление установщика..." + ColorReset)
+		}
+		// Запуск процесса, который дождется выхода этой программы и удалит файлы
+		scheduleCleanup(tempDir, del)
 	}
 
 	fmt.Println(ColorBrightYellow + "Установка успешно завершена!" + ColorReset)
@@ -142,13 +167,13 @@ func main() {
 	}
 }
 
-// fail Выводит ошибки в консоль и завершает программу
+// fail выводит ошибки в консоль и завершает программу
 func fail(msg string, err error) {
 	fmt.Fprintln(os.Stderr, ColorBrightRed+msg, err, ColorReset)
 	os.Exit(1)
 }
 
-// genID Генерирует ID заданной длины, используя символы [0-9A-Z]
+// genID генерирует ID заданной длины, используя символы [0-9A-Z]
 func genID(n int) (string, error) {
 	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	var b strings.Builder
@@ -163,7 +188,7 @@ func genID(n int) (string, error) {
 	return b.String(), nil
 }
 
-// makeTempWorkDir Создаёт временную рабочую директорию в %TEMP%
+// makeTempWorkDir создаёт временную рабочую директорию в %TEMP%
 func makeTempWorkDir() (string, error) {
 	base := os.TempDir()
 	for i := 0; i < 10; i++ {
@@ -188,7 +213,7 @@ func makeTempWorkDir() (string, error) {
 	return "", fmt.Errorf("не удалось подобрать имя для временной папки")
 }
 
-// writeEmbeddedToFile Записывает содержимое встроенного файла в файловую систему
+// writeEmbeddedToFile записывает содержимое встроенного файла в файловую систему
 func writeEmbeddedToFile(embeddedPath, outPath string) (string, error) {
 	data, err := content.ReadFile(embeddedPath)
 	if err != nil {
@@ -212,7 +237,7 @@ func writeEmbeddedToFile(embeddedPath, outPath string) (string, error) {
 	return outPath, nil
 }
 
-// hasForceFlag Возвращает истину, если в аргументах передан ключ --force
+// hasForceFlag возвращает истину, если в аргументах передан ключ --force
 func hasForceFlag() bool {
 	for _, a := range os.Args[1:] {
 		if strings.EqualFold(a, "--force") {
@@ -220,4 +245,27 @@ func hasForceFlag() bool {
 		}
 	}
 	return false
+}
+
+// hasDelFlag возвращает истину, если в аргументах передан ключ --del
+func hasDelFlag() bool {
+	for _, a := range os.Args[1:] {
+		if strings.EqualFold(a, "--del") {
+			return true
+		}
+	}
+	return false
+}
+
+// printHelp выводит справку по доступным ключам запуска
+func printHelp() {
+	// Ярко белый цвет ключей, для контрастности
+	blue := ColorBrightBlue
+	reset := ColorReset
+
+	fmt.Println("Доступные ключи установщика InstFiReAgent:")
+	fmt.Printf("    %s?%s, %s-h%s, %s--help%s          — Вызов справки.\n", blue, reset, blue, reset, blue, reset)
+	fmt.Printf("    %s--version%s              — Узнать версию установщика.\n", blue, reset)
+	fmt.Printf("    %s--force%s                — Автоматическая установка, без ожидания нажатия Enter в конце.\n", blue, reset)
+	fmt.Printf("    %s--del%s                  — Удаляет сам установщик InstFiReAgent, после окончания его работы.\n", blue, reset)
 }

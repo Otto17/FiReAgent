@@ -12,7 +12,7 @@ namespace ModuleCommand
 {
     internal class Program
     {
-        private const string CurrentVersion = "17.10.25"; // Текущая версия ModuleCommand в формате "дд.мм.гг"
+        private const string CurrentVersion = "26.11.25"; // Текущая версия ModuleCommand в формате "дд.мм.гг"
 
         internal static async Task Main(string[] args)
         {

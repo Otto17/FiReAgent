@@ -22,6 +22,7 @@ var (
 	ColorOrange       string // Оранжевый
 	ColorPink         string // Розовый
 	ColorTeal         string // Бирюзовый
+	ColorBrightBlue   string // Ярко-синий
 	ColorReset        string // Сброс цвета
 )
 
@@ -38,6 +39,7 @@ func initColors() {
 		ColorOrange = "\033[38;5;208m"  // Оранжевый
 		ColorPink = "\033[38;5;213m"    // Розовый
 		ColorTeal = "\033[38;5;44m"     // Бирюзовый
+		ColorBrightBlue = "\033[94m"    // Ярко-синий
 		ColorReset = "\033[0m"          // Сброс цвета
 	} else {
 		// Все цвета остаются пустыми строками, если ANSI не поддерживается
@@ -50,6 +52,7 @@ func initColors() {
 		ColorOrange = ""
 		ColorPink = ""
 		ColorTeal = ""
+		ColorBrightBlue = ""
 		ColorReset = ""
 	}
 }

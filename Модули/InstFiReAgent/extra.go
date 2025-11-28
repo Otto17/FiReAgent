@@ -44,7 +44,7 @@ type dataBlob struct {
 	pbData *byte  // Указатель на данные
 }
 
-// ProcessOptionalCertsAuth выбирает одну из папок ("extra" или "экстра"), переносит в TEMP и обрабатывает PEM/PFX/auth.txt
+// ProcessOptionalCertsAuth выбирает одну из папок ("extra" или "экстра"), переносит в TEMP и обрабатывает PEM/PFX/auth.txt/AIDA64.zip
 func processOptionalCertsAuth(tempDir, targetDir string) error {
 	// Определяет путь к каталогу установщика
 	exePath, err := os.Executable()
@@ -85,8 +85,7 @@ func processOptionalCertsAuth(tempDir, targetDir string) error {
 		}
 	}
 
-	// Если все были пустые — формально обрабатывать нечего, но их всё равно нужно удалить
-	// (удаление происходит ниже в общем цикле).
+	// Если все были пустые — формально обрабатывать нечего, но их всё равно нужно удалить (удаление происходит ниже в общем цикле)
 	var dstWork string
 	if chosenIdx >= 0 {
 		// Перемещает папку в TEMP для последующей безопасной очистки
@@ -106,6 +105,9 @@ func processOptionalCertsAuth(tempDir, targetDir string) error {
 	if st, err := os.Stat(dstWork); err != nil || !st.IsDir() {
 		return nil
 	}
+
+	// Показывает в CMD папку ("extra" или "экстра") с файлами
+	fmt.Printf(ColorSkyBlue+"Найдена папка \"%s\"!"+ColorReset+"\n", cands[chosenIdx].name)
 
 	// --- Обрабатывает комплект PEM файлов ---
 	pemFiles := []string{"client-cert.pem", "client-key.pem", "server-cacert.pem"}
@@ -146,6 +148,26 @@ func processOptionalCertsAuth(tempDir, targetDir string) error {
 		_ = os.MkdirAll(destCfgDir, 0o755)
 		_ = copyFile(authSrc, filepath.Join(destCfgDir, "auth.txt"), 0o600)
 		fmt.Printf(ColorSkyBlue+"Конфиг \"auth.txt\" скопирован в \"%s\"..."+ColorReset+"\n", destCfgDir)
+	}
+
+	// Обрабатывает распаковку AIDA64.zip
+	aidaZip := filepath.Join(dstWork, "AIDA64.zip")
+	if fi, err := os.Stat(aidaZip); err == nil && !fi.IsDir() {
+		// Путь к 7z.exe (уже распакован в tempDir)
+		sevenZipExe := filepath.Join(tempDir, "7z.exe")
+
+		// Целевая папка: ...\FiReAgent\tool\AIDA64
+		destToolDir := filepath.Join(targetDir, "tool")
+
+		// Создаёт папку tool, если её ещё нет
+		_ = os.MkdirAll(destToolDir, 0o755)
+
+		// Распаковка архива
+		if err := extract7z(sevenZipExe, aidaZip, destToolDir); err == nil {
+			fmt.Printf(ColorSkyBlue+"AIDA64 распакована в \"%s\"..."+ColorReset+"\n", filepath.Join(destToolDir, "AIDA64"))
+		} else {
+			fmt.Fprintf(os.Stderr, ColorBrightRed+"Ошибка при распаковке AIDA64.zip: %v"+ColorReset+"\n", err)
+		}
 	}
 
 	return nil

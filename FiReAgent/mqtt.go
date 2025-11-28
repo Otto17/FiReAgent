@@ -36,6 +36,7 @@ type MQTTService struct {
 	isConnected bool          // Текущее состояние подключения
 	connLock    sync.RWMutex  // Мьютекс для состояния подключения
 	ops         *OpTracker    // Трекер операций, отслеживает активные задачи и управляет их завершением
+	connectedAt time.Time     // Хранит время запуска сервиса для определения приоритета при конфликте ID клиентов
 }
 
 // StartMQTTClient создаёт MQTT-соединение и возвращает объект MQTTService
@@ -48,8 +49,9 @@ func StartMQTTClient() *MQTTService {
 
 	// Инициализирует объект сервиса, трекер и сохраняет mqttID
 	svc := &MQTTService{
-		mqttID: mqttID,
-		ops:    NewOpTracker(), // Инициализация трекера
+		mqttID:      mqttID,
+		ops:         NewOpTracker(), // Инициализация трекера
+		connectedAt: time.Now(),     // Фиксирует время старта сервиса (не обновляется при разрывах сети)
 	}
 
 	// Использует TLS-соединение при парсинге URL брокера
@@ -123,6 +125,34 @@ func StartMQTTClient() *MQTTService {
 				// Устанавливает флаг отключения
 				svc.setConnected(false)
 
+				// Обрабатывает конфликт "Session Taken Over", код 142 (0x8E), возникающий при дублировании ID
+				if d.ReasonCode == 142 {
+					// Вычисляет длительность работы сервиса с момента запуска
+					sessionDuration := time.Since(svc.connectedAt)
+
+					// Определяет временной порог для признания клиента дубликатом (копией)
+					const newbieThreshold = 10 * time.Second
+
+					log.Printf("СЕРВЕР: Принудительное отключение (Session takeover). Время работы агента: %v", sessionDuration)
+
+					if sessionDuration < newbieThreshold {
+						log.Printf("ОБНАРУЖЕН КОНФЛИКТ: Время работы %v (меньше порога %v). Сброс ID и перезапуск.", sessionDuration, newbieThreshold)
+
+						// Удаляет файл конфигурации ID
+						if err := deleteMqttIDConfig(); err != nil {
+							log.Printf("Ошибка удаления MqttID.conf: %v", err)
+						} else {
+							log.Println("Файл MqttID.conf удален.")
+						}
+
+						// Завершает процесс для перезапуска службы и генерации нового ID
+						os.Exit(1)
+					} else {
+						log.Printf("ОБНАРУЖЕН КОНФЛИКТ: Время работы %v (признак оригинала). Ожидание автоматического переподключения...", sessionDuration)
+						// Игнорирует ошибку, позволяя Autopaho выполнить переподключение и вытеснить дубликат
+					}
+				}
+
 				if d.Properties != nil {
 					log.Printf("Сервер запросил отключение: %s", d.Properties.ReasonString)
 				} else {
@@ -185,7 +215,22 @@ func StartMQTTClient() *MQTTService {
 	return svc
 }
 
-// Хелпер для "дренажа" операций с таймаутом
+// deleteMqttIDConfig удаляет файл "MqttID.conf" для сброса текущего ID клиента
+func deleteMqttIDConfig() error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	configPath := filepath.Join(filepath.Dir(exePath), "config", "MqttID.conf")
+
+	// Проверяет, существует ли файл перед удалением
+	if _, err := os.Stat(configPath); err == nil {
+		return os.Remove(configPath)
+	}
+	return nil
+}
+
+// DrainActiveOperations ожидает завершения всех активных задач с указанным таймаутом
 func (svc *MQTTService) DrainActiveOperations(timeout time.Duration) bool {
 	return svc.ops.WaitWithTimeout(timeout)
 }

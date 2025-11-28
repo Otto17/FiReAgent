@@ -25,7 +25,7 @@ import (
 //go:embed openssl/*
 var embeddedFS embed.FS // EmbeddedFS содержит встроенные ресурсы папки "openssl"
 
-const CurrentVersion = "01.11.25" // Текущая версия GenCryAgent в формате "дд.мм.гг"
+const CurrentVersion = "26.11.25" // Текущая версия GenCryAgent в формате "дд.мм.гг"
 
 func main() {
 	// Отображает версию GenCryAgent

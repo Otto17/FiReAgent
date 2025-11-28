@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	CurrentVersion = "01.11.25" // Текущая версия ClientUpdater в формате "дд.мм.гг"
+	CurrentVersion = "26.11.25" // Текущая версия ClientUpdater в формате "дд.мм.гг"
 
 	exeName         = "FiReAgent.exe"                                                 // Главный исполняемый файл агента, который будет останавливаться (служба) пред обновлением и запускаться после
 	zipAssetPattern = `^FiReAgent-([0-9]{2}\.[0-9]{2}\.[0-9]{2})-windows-amd64\.zip$` // Шаблон имени ZIP-ассета релиза "FiReAgent-дд.мм.гг-windows-amd64.zip"
@@ -212,7 +212,9 @@ func run(conf UpdaterConf) error {
 	}
 
 	// Применяет операции обновления, описанные в манифесте
-	if err := applyOperations(extractDir, baseDir, man); err != nil {
+	// selfUpdatePending будет true, если ClientUpdater был обновлен (создан _new.exe)
+	selfUpdatePending, err := applyOperations(extractDir, baseDir, man)
+	if err != nil {
 		return fmt.Errorf("ошибка применения обновления: %w", err)
 	}
 
@@ -221,6 +223,14 @@ func run(conf UpdaterConf) error {
 		return fmt.Errorf("не удалось запустить FiReAgent (-is): %w", err)
 	}
 	log.Printf("FiReAgent запущен (-is).")
+
+	// Если было запланировано самообновление
+	if selfUpdatePending {
+		myExe, _ := os.Executable()
+		newExe := strings.TrimSuffix(myExe, ".exe") + "_new.exe"
+		log.Println("Запуск планировщика самообновления (замена ClientUpdater.exe после выхода)...")
+		scheduleSelfUpdate(newExe, myExe)
+	}
 
 	// Обновляет локальную историю обновлений
 	if err := appendUpdateHistory(conf.UpdateDir, meta.RemoteVersion, meta.Repo); err != nil {

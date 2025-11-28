@@ -30,7 +30,7 @@ func createDeleteProcess(paths ...string) {
 	delCmd := strings.Join(delParts, " & ")
 
 	// Ждет завершения текущего процесса, затем удаляет каталоги
-	cmdLine := fmt.Sprintf(`cmd /C "for /l %%i in (1,1,30) do (timeout /t 1 /nobreak >nul & tasklist /fi "PID eq %d" | findstr %d >nul || (%s & exit))"`, pid, pid, delCmd)
+	cmdLine := fmt.Sprintf(`cmd /C "for /l %%i in (0,0,1) do (timeout /t 1 /nobreak >nul & tasklist /fi "PID eq %d" | findstr %d >nul || (%s & exit))"`, pid, pid, delCmd)
 
 	startupInfo := &syscall.StartupInfo{}
 	startupInfo.Cb = uint32(unsafe.Sizeof(*startupInfo))

@@ -10,34 +10,48 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
+	"unsafe"
 )
 
 // ApplyOperations применяет операции обновления и удаления из манифеста
-func applyOperations(extractDir, baseDir string, man *Manifest) error {
+// Возвращает true, если запланировано самообновление (создан файл _new.exe)
+func applyOperations(extractDir, baseDir string, man *Manifest) (bool, error) {
 	fiRoot := filepath.Join(extractDir, "FiReAgent")
 
 	log.Printf("Применение манифеста: %d операций", len(man.Files))
 	var updatedCount, deletedCount, skippedDeleteCount int
 
+	// Путь к текущему исполняемому файлу для детекта самообновления
+	myExe, _ := os.Executable()
+	selfUpdatePending := false
+
 	for _, it := range man.Files {
+		// Проверяет, является ли целевой файл текущим апдейтером
+		isSelfUpdate := false
+
+		destAbs, err := resolveDest(baseDir, orDefault(it.Dest, it.Src))
+		if err == nil && myExe != "" && strings.EqualFold(filepath.Clean(destAbs), filepath.Clean(myExe)) {
+			isSelfUpdate = true
+		}
+
 		switch it.Action {
 		case ActUpdate:
 			srcRel := filepath.FromSlash(strings.TrimLeft(it.Src, `/\`))
 			if srcRel == "" {
-				return fmt.Errorf("files.update: не задан Src")
+				return selfUpdatePending, fmt.Errorf("files.update: не задан Src")
 			}
 			srcAbs := filepath.Clean(filepath.Join(fiRoot, srcRel))
 
 			// Проверяет, что источник находится внутри распакованного каталога FiReAgent
 			rootClean := filepath.Clean(fiRoot)
 			if !strings.EqualFold(rootClean, srcAbs) && !strings.HasPrefix(strings.ToLower(srcAbs)+string(os.PathSeparator), strings.ToLower(rootClean)+string(os.PathSeparator)) {
-				return fmt.Errorf("Src вне FiReAgent/: %s", it.Src)
+				return selfUpdatePending, fmt.Errorf("src вне FiReAgent/: %s", it.Src)
 			}
 
-			destAbs, err := resolveDest(baseDir, orDefault(it.Dest, it.Src))
 			if err != nil {
-				return err
+				return selfUpdatePending, err
 			}
 
 			// Вычисляет относительные пути для записи в лог
@@ -53,6 +67,27 @@ func applyOperations(extractDir, baseDir string, man *Manifest) error {
 				size = inf.Size()
 			}
 
+			// Логика самообновления
+			if isSelfUpdate {
+				// Распаковывает с именем "ClientUpdater_new.exe"
+				newName := strings.TrimSuffix(destAbs, ".exe") + "_new.exe"
+				_ = os.Remove(newName) // Удаляет старый _new если есть
+
+				// Копирует файл
+				info, err := os.Stat(srcAbs)
+				if err != nil {
+					return selfUpdatePending, err
+				}
+				if err := copyFile(srcAbs, newName, info.Mode()); err != nil {
+					return selfUpdatePending, fmt.Errorf("ошибка подготовки самообновления: %w", err)
+				}
+
+				log.Printf("САМООБНОВЛЕНИЕ: новая версия сохранена как %s. Будет применена при выходе.", filepath.Base(newName))
+				selfUpdatePending = true
+				updatedCount++
+				continue
+			}
+
 			if size >= 0 {
 				log.Printf("ОБНОВЛЕНИЕ: %s -> %s (%d байт)", srcLog, destLog, size)
 			} else {
@@ -60,7 +95,7 @@ func applyOperations(extractDir, baseDir string, man *Manifest) error {
 			}
 
 			if err := copyReplace(srcAbs, destAbs); err != nil {
-				return fmt.Errorf("ошибка применения обновления: обновлено %s -> %s: %w", srcAbs, destAbs, err)
+				return selfUpdatePending, fmt.Errorf("ошибка применения обновления: обновлено %s -> %s: %w", srcAbs, destAbs, err)
 			}
 
 			updatedCount++
@@ -72,7 +107,14 @@ func applyOperations(extractDir, baseDir string, man *Manifest) error {
 		case ActDelete:
 			destAbs, err := resolveDest(baseDir, it.Dest)
 			if err != nil {
-				return err
+				return selfUpdatePending, err
+			}
+
+			// Защита от удаления самого себя
+			if isSelfUpdate {
+				log.Printf("ПРОПУСК удаления апдейтера: %s", destAbs)
+				skippedDeleteCount++
+				continue
 			}
 
 			destLog := destAbs
@@ -91,7 +133,7 @@ func applyOperations(extractDir, baseDir string, man *Manifest) error {
 			}
 
 			if err := deletePath(destAbs); err != nil {
-				return fmt.Errorf("ошибка применения обновления: удалён %s: %w", destAbs, err)
+				return selfUpdatePending, fmt.Errorf("ошибка применения обновления: удалён %s: %w", destAbs, err)
 			}
 
 			if existed {
@@ -103,12 +145,12 @@ func applyOperations(extractDir, baseDir string, man *Manifest) error {
 			}
 
 		default:
-			return fmt.Errorf("неизвестный Action: %s", it.Action)
+			return selfUpdatePending, fmt.Errorf("неизвестный Action: %s", it.Action)
 		}
 	}
 
 	log.Printf("Сводка: обновлено=%d, удалено=%d, пропущено удалений=%d", updatedCount, deletedCount, skippedDeleteCount)
-	return nil
+	return selfUpdatePending, nil
 }
 
 // OrDefault возвращает строку, если она не пуста, иначе возвращает значение по умолчанию
@@ -129,7 +171,7 @@ func copyReplace(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
-	
+
 	// Использует несколько попыток на случай, если целевой файл временно занят другой программой
 	for range 5 {
 		tmp := dst + ".tmp"
@@ -178,7 +220,7 @@ func deletePath(p string) error {
 	if fi.IsDir() {
 		return os.RemoveAll(p)
 	}
-	
+
 	// Использует несколько попыток на случай, если файл временно занят другой программой
 	for range 5 {
 		if err := os.Remove(p); err == nil || os.IsNotExist(err) {
@@ -187,4 +229,28 @@ func deletePath(p string) error {
 		time.Sleep(200 * time.Millisecond)
 	}
 	return fmt.Errorf("не удалось удалить: %s", p)
+}
+
+// scheduleSelfUpdate запускает скрытый CMD процесс, который ждет завершения текущего PID, а затем заменяет oldExe на newExe (move /y)
+func scheduleSelfUpdate(newExe, oldExe string) {
+	pid := os.Getpid()
+
+	// Формирование команды: ждёт PID, если PID нет -> перемещает new поверх old, "move /y" перезаписывает целевой файл
+	cleanCmd := fmt.Sprintf(`move /y "%s" "%s"`, newExe, oldExe)
+
+	// Ждёт завершения процесса (PID) в цикле (раз в секунду), затем выполняет подмену
+	cmdLine := fmt.Sprintf(
+		`cmd /C "for /l %%i in (0,0,1) do (timeout /t 1 /nobreak >nul & tasklist /fi "PID eq %d" | findstr %d >nul || (%s & exit))"`,
+		pid, pid, cleanCmd,
+	)
+
+	// Настраивает параметры для скрытого запуска процесса через WinAPI
+	si := &syscall.StartupInfo{Cb: uint32(unsafe.Sizeof(syscall.StartupInfo{})), Flags: 0x1, ShowWindow: 0}
+	pi := &syscall.ProcessInformation{}
+	cmdLinePtr, _ := syscall.UTF16PtrFromString(cmdLine)
+
+	const CREATE_NO_WINDOW = 0x08000000 // Запускает процесс без создания окна
+	syscall.CreateProcess(nil, cmdLinePtr, nil, nil, false, CREATE_NO_WINDOW, nil, nil, si, pi)
+	syscall.CloseHandle(pi.Process) // Освобождает ресурсы, не дожидаясь завершения
+	syscall.CloseHandle(pi.Thread)
 }

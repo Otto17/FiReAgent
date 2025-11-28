@@ -22,7 +22,7 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-const CurrentVersion = "01.11.25" // Текущая версия ModuleQUIC в формате "дд.мм.гг"
+const CurrentVersion = "26.11.25" // Текущая версия ModuleQUIC в формате "дд.мм.гг"
 
 // ModuleData описывает структуру данных для получения всех параметров от FiReAgent
 type ModuleData struct {

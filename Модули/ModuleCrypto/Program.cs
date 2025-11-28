@@ -20,7 +20,7 @@ namespace ModuleCrypto
 {
     internal class Program
     {
-        private const string CurrentVersion = "17.10.25"; // Текущая версия ModuleCrypto в формате "дд.мм.гг"
+        private const string CurrentVersion = "26.11.25"; // Текущая версия ModuleCrypto в формате "дд.мм.гг"
 
         internal static void Main(string[] args)
         {
@@ -133,7 +133,7 @@ namespace ModuleCrypto
 
                 // Переменные для хранения данных из конфига "auth.txt"
                 string serverURL = null;
-                string portMQTT = "8883";
+                string portMQTT = "8783";
                 string loginMQTT = null;
                 string passwordMQTT = null;
                 string portQUIC = "4242";
@@ -197,7 +197,7 @@ namespace ModuleCrypto
                             "# IP-адрес или домен сервера FiReMQ (TCP)\n" +
                             "ServerURL=\n\n" +
                             "# TCP порт MQTT брокера (mTLS)\n" +
-                            "PortMQTT=8883\n\n" +
+                            "PortMQTT=8783\n\n" +
                             "# Логин для подключения к MQTT брокеру\n" +
                             "LoginMQTT=\n\n" +
                             "# Пароль для подключения к MQTT брокеру\n" +
@@ -238,7 +238,7 @@ namespace ModuleCrypto
                         "# IP-адрес или домен сервера FiReMQ (TCP)\n" +
                         "ServerURL=\n\n" +
                         "# TCP порт MQTT брокера (mTLS)\n" +
-                        "PortMQTT=8883\n\n" +
+                        "PortMQTT=8783\n\n" +
                         "# Логин для подключения к MQTT брокеру\n" +
                         "LoginMQTT=\n\n" +
                         "# Пароль для подключения к MQTT брокеру\n" +
@@ -264,7 +264,7 @@ namespace ModuleCrypto
                     }
 
                     // Передаёт режим (mode) в HandlePipeMode
-                    HandlePipeMode(pipeName, aesKeyEnc, clientCertEnc, clientKeyEnc, caCertEnc, serverURL ?? "", portMQTT ?? "8883", loginMQTT ?? "", passwordMQTT ?? "", portQUIC ?? "4242", cert, mode);
+                    HandlePipeMode(pipeName, aesKeyEnc, clientCertEnc, clientKeyEnc, caCertEnc, serverURL ?? "", portMQTT ?? "8783", loginMQTT ?? "", passwordMQTT ?? "", portQUIC ?? "4242", cert, mode);
                 }
                 else if (encryptedFilesExist)
                 {
@@ -451,7 +451,7 @@ namespace ModuleCrypto
         private static void ParseAuthContent(string content, out string serverURL, out string portMQTT, out string loginMQTT, out string passwordMQTT, out string portQUIC)
         {
             serverURL = "";
-            portMQTT = "8883";
+            portMQTT = "8783";
             loginMQTT = null;
             passwordMQTT = null;
             portQUIC = "4242";
@@ -480,7 +480,7 @@ namespace ModuleCrypto
                 switch (key)
                 {
                     case "serverurl": serverURL = value; break;
-                    case "portmqtt": portMQTT = string.IsNullOrEmpty(value) ? "8883" : value; break;
+                    case "portmqtt": portMQTT = string.IsNullOrEmpty(value) ? "8783" : value; break;
                     case "loginmqtt": loginMQTT = value; break;
                     case "passwordmqtt": passwordMQTT = value; break;
                     case "portquic": portQUIC = string.IsNullOrEmpty(value) ? "4242" : value; break;

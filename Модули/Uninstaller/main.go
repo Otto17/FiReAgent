@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	CurrentVersion = "01.11.25" // Текущая версия Uninstall в формате "дд.мм.гг"
+	CurrentVersion = "26.11.25" // Текущая версия Uninstall в формате "дд.мм.гг"
 
 	// Флаги MessageBox
 	MB_YESNO        = 0x00000004 // Кнопки "Да" и "Нет"

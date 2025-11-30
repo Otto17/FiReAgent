@@ -12,35 +12,23 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
 
-// CheckResult содержит информацию о последнем доступном релизе
+// CheckResult содержит информацию о релизе
 type CheckResult struct {
-	Repo          string // Название репозитория (gitflic или github)
-	RemoteVersion string // Удалённая версия релиза
-	AssetName     string // Имя файла ассета
-	AssetURL      string // URL для скачивания ассета
-	ExpectedSHA   string // Ожидаемый SHA хэш
+	Repo          string    // Название репозитория (gitflic или github)
+	RemoteVersion string    // Удалённая версия релиза
+	AssetName     string    // Имя файла ассета
+	AssetURL      string    // URL для скачивания ассета
+	ExpectedSHA   string    // Ожидаемый SHA хэш
+	ReleaseDate   time.Time // Дата релиза для сортировки
 }
 
-// NeedUpdate проверяет, требуется ли обновление, сравнивая локальную и удаленную версии
-func (cr *CheckResult) NeedUpdate(local string) bool {
-	const layout = "02.01.06"
-	rt, err := time.Parse(layout, cr.RemoteVersion)
-	if err != nil {
-		return true
-	}
-	lt, err := time.Parse(layout, local)
-	if err != nil {
-		return true
-	}
-	return rt.After(lt)
-}
-
-// CheckLatest ищет последний доступный релиз, используя указанный приоритет источников
-func CheckLatest(ctx context.Context, primary, ghURL, gfURL, gfToken string) (*CheckResult, []string, error) {
+// CheckUpdates ищет ВСЕ доступные обновления новее локальной (текущей) версии и возвращает их отсортированными по дате (от старых к новым)
+func CheckUpdates(ctx context.Context, localVer, primary, ghURL, gfURL, gfToken string) ([]CheckResult, []string, error) {
 	p := strings.ToLower(strings.TrimSpace(primary))
 	var trace []string
 
@@ -55,152 +43,200 @@ func CheckLatest(ctx context.Context, primary, ghURL, gfURL, gfToken string) (*C
 		}
 	}
 
+	var results []CheckResult
+	var err error
+
+	// Логика выбора репозитория
 	switch p {
 	case "github":
-		if res, err := checkLatestFromGitHub(ctx, ghURL); err == nil {
-			return res, trace, nil
-		} else {
-			// Использует GitFlic, если GitHub недоступен
-			add("Не удалось получить с GitHub", err, "пробуем GitFlic")
-			if res2, err2 := checkLatestFromGitFlic(ctx, gfURL, gfToken); err2 == nil {
-				return res2, trace, nil
-			} else {
-				add("Не удалось получить с GitFlic", err2, "")
-				return nil, trace, fmt.Errorf("оба источника недоступны")
-			}
+		results, err = getUpdatesFromGitHub(ctx, ghURL, localVer)
+		if err == nil {
+			return results, trace, nil
 		}
+		add("GitHub не ответил или ошибка", err, "пробуем GitFlic")
+
+		results, err = getUpdatesFromGitFlic(ctx, gfURL, gfToken, localVer)
+		if err == nil {
+			return results, trace, nil
+		}
+		add("GitFlic не ответил", err, "")
 
 	case "gitflic":
-		if res, err := checkLatestFromGitFlic(ctx, gfURL, gfToken); err == nil {
-			return res, trace, nil
-		} else {
-			// Использует GitHub, если GitFlic недоступен
-			add("Не удалось получить с GitFlic", err, "пробуем GitHub")
-			if res2, err2 := checkLatestFromGitHub(ctx, ghURL); err2 == nil {
-				return res2, trace, nil
-			} else {
-				add("Не удалось получить с GitHub", err2, "")
-				return nil, trace, fmt.Errorf("оба источника недоступны")
-			}
+		results, err = getUpdatesFromGitFlic(ctx, gfURL, gfToken, localVer)
+		if err == nil {
+			return results, trace, nil
 		}
+		add("GitFlic не ответил или ошибка", err, "пробуем GitHub")
+
+		results, err = getUpdatesFromGitHub(ctx, ghURL, localVer)
+		if err == nil {
+			return results, trace, nil
+		}
+		add("GitHub не ответил", err, "")
 	}
 
-	// Выполняется дефолтная логика: GitFlic -> GitHub
-	if res, err := checkLatestFromGitFlic(ctx, gfURL, gfToken); err == nil {
-		return res, trace, nil
-	} else {
-		add("Не удалось получить с GitFlic", err, "пробуем GitHub")
-		if res2, err2 := checkLatestFromGitHub(ctx, ghURL); err2 == nil {
-			return res2, trace, nil
-		} else {
-			add("Не удалось получить с GitHub", err2, "")
-			return nil, trace, fmt.Errorf("оба источника недоступны")
-		}
+	// Логика по умолчанию (если основной репозиторий не задан или неизвестен): GitFlic -> GitHub
+	results, err = getUpdatesFromGitFlic(ctx, gfURL, gfToken, localVer)
+	if err == nil {
+		return results, trace, nil
 	}
+	add("GitFlic (default) не ответил", err, "пробуем GitHub")
+
+	results, err = getUpdatesFromGitHub(ctx, ghURL, localVer)
+	if err == nil {
+		return results, trace, nil
+	}
+	add("GitHub не ответил", err, "")
+
+	return nil, trace, fmt.Errorf("не удалось получить список обновлений ни из одного источника")
+}
+
+// parseDate парсит версию вида "дд.мм.гг" в time.Time
+func parseDate(v string) (time.Time, error) {
+	return time.Parse("02.01.06", strings.TrimSpace(v))
+}
+
+// sortUpdates сортирует слайс обновлений по возрастанию даты (сначала старые, потом новые)
+func sortUpdates(list []CheckResult) {
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].ReleaseDate.Before(list[j].ReleaseDate)
+	})
 }
 
 // -------------------------------------------------------------
 // GitHub
 // -------------------------------------------------------------
 
-// ghRelease представляет структуру ответа API GitHub для релиза
 type ghRelease struct {
 	TagName string    `json:"tag_name"`
 	Assets  []ghAsset `json:"assets"`
 }
 
-// ghAsset представляет структуру ответа API GitHub для ассета
 type ghAsset struct {
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
-// toGitHubAPI преобразует пользовательский URL в URL для GitHub API releases/latest
-func toGitHubAPI(urlStr string) (string, error) {
+// toGitHubAPIList преобразует URL в URL для GitHub API из releases/latest в /releases (для получения списка)
+func toGitHubAPIList(urlStr string) (string, error) {
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return "", err
 	}
+
+	// Если в конфиге указано .../releases/latest, обрезуется в /latest
+	u.Path = strings.TrimSuffix(u.Path, "/latest")
+
 	if strings.EqualFold(u.Host, "api.github.com") && strings.HasPrefix(u.Path, "/repos/") {
 		return u.String(), nil
 	}
 	if strings.EqualFold(u.Host, "github.com") {
 		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-		if len(parts) >= 4 && parts[2] == "releases" && parts[3] == "latest" {
-			return fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", parts[0], parts[1]), nil
+		// Ожидание получить: owner/repo/releases
+		if len(parts) >= 3 && parts[2] == "releases" {
+			return fmt.Sprintf("https://api.github.com/repos/%s/%s/releases", parts[0], parts[1]), nil
 		}
 	}
-	return "", fmt.Errorf("не удалось преобразовать %q к API releases/latest", urlStr)
+	return "", fmt.Errorf("не удалось преобразовать URL %q к API списка релизов", urlStr)
 }
 
-// checkLatestFromGitHub получает информацию о последнем релизе через GitHub API
-func checkLatestFromGitHub(ctx context.Context, ghURL string) (*CheckResult, error) {
-	api, err := toGitHubAPI(ghURL)
+// getUpdatesFromGitHub запрашивает список релизов с GitHub и отбирает те, что новее локальной (текущей) версии
+func getUpdatesFromGitHub(ctx context.Context, ghURL, localVer string) ([]CheckResult, error) {
+	// Формирует URL API
+	api, err := toGitHubAPIList(ghURL)
 	if err != nil {
 		return nil, err
 	}
+
+	// Создаёт запрос с заголовками
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, api, nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "FiReAgent-ClientUpdater/1.0")
-
 	if token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); token != "" {
-		// Добавление токена для повышения лимита запросов
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
+	// Выполняет запрос
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("GitHub API: %w", err)
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("GitHub API status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
-	var rel ghRelease
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+
+	// Декодирует JSON ответ
+	var releases []ghRelease
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
 		return nil, err
 	}
 
-	// Поиск ассета, соответствующего шаблону
+	localTime, _ := parseDate(localVer) // Дата локальной версии
+	var updates []CheckResult
 	re := regexp.MustCompile(zipAssetPattern)
-	for _, a := range rel.Assets {
-		if m := re.FindStringSubmatch(a.Name); m != nil {
-			return &CheckResult{
-				Repo:          "github",
-				RemoteVersion: m[1],
-				AssetName:     a.Name,
-				AssetURL:      a.BrowserDownloadURL,
-				ExpectedSHA:   "",
-			}, nil
+
+	// Фильтрует релизы
+	for _, r := range releases {
+		remoteTime, err := parseDate(r.TagName)
+		if err != nil {
+			continue // Пропускает теги с неправильным форматом даты
+		}
+
+		// Берёт только те версии, дата которых строго больше локальной версии
+		if !remoteTime.After(localTime) {
+			continue
+		}
+
+		// Ищет нужный ZIP-ассет внутри релиза
+		for _, a := range r.Assets {
+			if m := re.FindStringSubmatch(a.Name); m != nil {
+				updates = append(updates, CheckResult{
+					Repo:          "github",
+					RemoteVersion: m[1],
+					AssetName:     a.Name,
+					AssetURL:      a.BrowserDownloadURL,
+					ExpectedSHA:   "", // GitHub в стандартном JSON не отдает SHA256 ассета
+					ReleaseDate:   remoteTime,
+				})
+				break // Один релиз - один ассет
+			}
 		}
 	}
-	return nil, fmt.Errorf("ассет по шаблону не найден: %s", zipAssetPattern)
+
+	if len(updates) == 0 {
+		return nil, fmt.Errorf("нет новых версий")
+	}
+
+	sortUpdates(updates)
+	return updates, nil
 }
 
 // -------------------------------------------------------------
 // GitFlic
 // -------------------------------------------------------------
 
-// gfReleases представляет корневой ответ API GitFlic для списка релизов
+// gfReleases - корневая структура ответа GitFlic (содержит список тегов)
 type gfReleases struct {
 	Embedded struct {
 		ReleaseTagModelList []gfRelease `json:"releaseTagModelList"`
 	} `json:"_embedded"`
 }
 
-// gfRelease представляет отдельный релиз GitFlic
+// gfRelease - отдельный релиз (тег) в GitFlic
 type gfRelease struct {
-	TagName         string    `json:"tagName"`
-	AttachmentFiles []gfAsset `json:"attachmentFiles"`
-	PreRelease      bool      `json:"preRelease"`
+	TagName         string    `json:"tagName"`         // Имя тега (версия)
+	AttachmentFiles []gfAsset `json:"attachmentFiles"` // Список вложений (файлов)
+	PreRelease      bool      `json:"preRelease"`      // Флаг предварительного релиза
 }
 
-// gfAsset представляет файл-вложение в релизе GitFlic
+// gfAsset - файл-вложение в релизе
 type gfAsset struct {
-	Name       string `json:"name"`
-	Link       string `json:"link"`
-	HashSha256 string `json:"hashSha256"`
+	Name       string `json:"name"`       // Имя файла
+	Link       string `json:"link"`       // Ссылка на скачивание
+	HashSha256 string `json:"hashSha256"` // Хэш файла (GitFlic предоставляет его)
 }
 
 // toGitFlicAPI преобразует пользовательский URL в URL для GitFlic API
@@ -216,76 +252,79 @@ func toGitFlicAPI(urlStr string) (string, error) {
 	return u.String(), nil
 }
 
-// checkLatestFromGitFlic получает информацию о последнем релизе через GitFlic API
-func checkLatestFromGitFlic(ctx context.Context, gfURL, token string) (*CheckResult, error) {
+// getUpdatesFromGitFlic запрашивает список релизов с GitFlic и отбирает те, что новее локальной (текущей) версии
+func getUpdatesFromGitFlic(ctx context.Context, gfURL, token, localVer string) ([]CheckResult, error) {
+	// Формирует URL API
 	api, err := toGitFlicAPI(gfURL)
 	if err != nil {
 		return nil, err
 	}
 
+	//  Создаёт запрос с заголовками (включая токен)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, api, nil)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "FiReAgent-ClientUpdater/1.0")
 	if strings.TrimSpace(token) != "" {
-		// Передача токена авторизации, если он предоставлен
 		req.Header.Set("Authorization", "token "+strings.TrimSpace(token))
 	}
 
+	// Выполняет запрос
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("GitFlic API: %w", err)
 	}
-
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("GitFlic API status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 
+	// Декодирует JSON ответ
 	var rels gfReleases
 	if err := json.NewDecoder(resp.Body).Decode(&rels); err != nil {
 		return nil, err
 	}
-	latest := pickLatestGF(rels.Embedded.ReleaseTagModelList)
-	if latest == nil {
-		return nil, fmt.Errorf("не найден релиз с валидным tagName")
-	}
 
-	// Поиск ассета, соответствующего шаблону, среди вложений
+	localTime, _ := parseDate(localVer) // Дата локальной версии
+	var updates []CheckResult
 	re := regexp.MustCompile(zipAssetPattern)
-	for _, a := range latest.AttachmentFiles {
-		if m := re.FindStringSubmatch(a.Name); m != nil {
-			return &CheckResult{
-				Repo:          "gitflic",
-				RemoteVersion: m[1],
-				AssetName:     a.Name,
-				AssetURL:      a.Link,
-				ExpectedSHA:   strings.ToLower(strings.TrimSpace(a.HashSha256)),
-			}, nil
-		}
-	}
-	return nil, fmt.Errorf("в релизе нет ассета по шаблону: %s", zipAssetPattern)
-}
 
-// pickLatestGF выбирает самый свежий (по дате в теге) релиз, игнорируя PreRelease
-func pickLatestGF(list []gfRelease) *gfRelease {
-	var best *gfRelease
-	var bestT time.Time
-	for i := range list {
-		r := &list[i]
+	// Фильтрует релизы
+	for _, r := range rels.Embedded.ReleaseTagModelList {
 		if r.PreRelease {
-			// Пропускает предварительные релизы
-			continue
+			continue // Пропускаем PreRelease
 		}
-		t, err := time.Parse("02.01.06", r.TagName)
+		remoteTime, err := parseDate(r.TagName)
 		if err != nil {
-			// Игнорирует теги, которые не соответствуют формату даты
+			continue // Пропускает теги с неправильным форматом даты
+		}
+
+		// Берёт только те версии, дата которых строго больше локальной версии
+		if !remoteTime.After(localTime) {
 			continue
 		}
-		if best == nil || t.After(bestT) {
-			best = r
-			bestT = t
+
+		// Ищет нужный ZIP-ассет внутри релиза
+		for _, a := range r.AttachmentFiles {
+			if m := re.FindStringSubmatch(a.Name); m != nil {
+				updates = append(updates, CheckResult{
+					Repo:          "gitflic",
+					RemoteVersion: m[1],
+					AssetName:     a.Name,
+					AssetURL:      a.Link,
+					ExpectedSHA:   strings.ToLower(strings.TrimSpace(a.HashSha256)), // Берёт хэш
+					ReleaseDate:   remoteTime,
+				})
+				break // Один релиз - один ассет
+			}
 		}
 	}
-	return best
+
+	if len(updates) == 0 {
+		return nil, fmt.Errorf("нет новых версий")
+	}
+
+	sortUpdates(updates)
+	return updates, nil
 }

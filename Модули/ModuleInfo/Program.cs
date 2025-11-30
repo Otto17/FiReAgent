@@ -8,7 +8,7 @@ namespace ModuleInfo
 {
     internal class Program
     {
-        private const string CurrentVersion = "26.11.25"; // Текущая версия ModuleInfo в формате "дд.мм.гг"
+        private const string CurrentVersion = "30.11.25"; // Текущая версия ModuleInfo в формате "дд.мм.гг"
 
         // Константа для запуска от пользователя СИСТЕМА и создания дочернего процесса в активном сеансе
         const string ChildArgument = "child";

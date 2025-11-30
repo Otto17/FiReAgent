@@ -49,6 +49,13 @@ namespace ModuleInfo
             htmlContent.AppendLine("<h1>Отчёт создан {TIME}</h1>");
         }
 
+        // Структура для хранения параметров диска
+        private struct DiskPhysParams
+        {
+            public ushort MediaType;
+            public uint SpindleSpeed;
+        }
+
         // WriteInfo сохраняет форматированные данные в HTML-контент
         private static void WriteInfo(string message, bool isHeader = false, bool isSubItem = false, string subItemClass = "")
         {
@@ -156,13 +163,19 @@ namespace ModuleInfo
             try
             {
                 var idSearcher = new ManagementObjectSearcher(@"root\wmi", "SELECT * FROM WmiMonitorID");
-
-                // Получает DeviceID и UserFriendlyName для сопоставления с WinAPI
                 monitorIDs = [.. idSearcher.Get().Cast<ManagementObject>()];
+            }
+            catch (ManagementException)
+            {
+                // WmiMonitorID не поддерживается на этой конфигурации (VM, RDP, некоторые драйверы) — это нормально
             }
             catch (Exception ex)
             {
-                Logging.WriteToLogFile($"Ошибка при получении WmiMonitorID: {ex.Message}");
+                // Логирует только неожиданные ошибки
+                if (!ex.Message.Contains("Не поддерживается") && !ex.Message.Contains("Not supported"))
+                {
+                    Logging.WriteToLogFile($"Ошибка при получении WmiMonitorID: {ex.Message}");
+                }
             }
 
             List<ManagementObject> basicParams;
@@ -760,64 +773,81 @@ namespace ModuleInfo
                 var disks = diskSearcher
                     .Get()
                     .Cast<ManagementObject>()
+                    .Where(d => d["Index"] != null)
                     .OrderBy(d => Convert.ToUInt32(d["Index"]))
                     .ToList();
 
                 // Использует пространство имен MSFT_PhysicalDisk для определения типа диска (SSD/HDD)
-                var storageScope = new ManagementScope(@"\\.\root\Microsoft\Windows\Storage");
-                storageScope.Connect();
-                var physQuery = new ObjectQuery(
+                Dictionary<string, DiskPhysParams> physDisks = [];
+                try
+                {
+                    var storageScope = new ManagementScope(@"\\.\root\Microsoft\Windows\Storage");
+                    storageScope.Connect();
+                    var physQuery = new ObjectQuery(
                     "SELECT DeviceId, MediaType, SpindleSpeed FROM MSFT_PhysicalDisk");
-                var physSearcher = new ManagementObjectSearcher(storageScope, physQuery);
-                var physDisks = physSearcher
-                    .Get()
-                    .Cast<ManagementObject>()
-                    .ToDictionary(
-                        mo => mo["DeviceId"].ToString(),
-                        mo => new
+                    var physSearcher = new ManagementObjectSearcher(storageScope, physQuery);
+
+                    foreach (ManagementObject mo in physSearcher.Get().Cast<ManagementObject>())
+                    {
+                        // Паттерн-матчинг гарантирует non-null строку
+                        if (mo["DeviceId"]?.ToString() is string deviceId && deviceId.Length > 0)
                         {
-                            MediaType = Convert.ToUInt16(mo["MediaType"]),
-                            SpindleSpeed = Convert.ToUInt32(mo["SpindleSpeed"])
+                            ushort mediaType = mo["MediaType"] != null ? Convert.ToUInt16(mo["MediaType"]) : (ushort)0;
+                            uint spindleSpeed = mo["SpindleSpeed"] != null ? Convert.ToUInt32(mo["SpindleSpeed"]) : 0;
+
+                            // Структура дисков
+                            physDisks[deviceId] = new DiskPhysParams { MediaType = mediaType, SpindleSpeed = spindleSpeed };
                         }
-                    );
+                    }
+                }
+                catch
+                {
+                    // MSFT_PhysicalDisk может быть недоступен на старых системах
+                }
 
                 // Собирает температуру дисков, используя библиотеку LibreHardwareMonitor
                 var storageTemps = new Dictionary<string, float>();
-                var computer = new Computer { IsStorageEnabled = true };
-                computer.Open();
-                foreach (var hw in computer.Hardware)
+                try
                 {
-                    if (hw.HardwareType == HardwareType.Storage)
+                    var computer = new Computer { IsStorageEnabled = true };
+                    computer.Open();
+                    foreach (var hw in computer.Hardware)
                     {
-                        hw.Update();
-                        var tempSensor = hw.Sensors
-                            .FirstOrDefault(s => s.SensorType == SensorType.Temperature);
-                        if (tempSensor?.Value != null)
-                            storageTemps[hw.Name] = tempSensor.Value.Value;
+                        if (hw.HardwareType == HardwareType.Storage && !string.IsNullOrEmpty(hw.Name))
+                        {
+                            hw.Update();
+                            var tempSensor = hw.Sensors
+                                .FirstOrDefault(s => s.SensorType == SensorType.Temperature);
+                            if (tempSensor?.Value != null)
+                                storageTemps[hw.Name] = tempSensor.Value.Value;
+                        }
                     }
+                    computer.Close();
                 }
-                computer.Close();
+                catch
+                {
+                    // Температура недоступна
+                }
 
                 int totalDisks = disks.Count;
                 for (int i = 0; i < totalDisks; i++)
                 {
                     var disk = disks[i];
-                    uint index = (uint)(disk["Index"] ?? 0);
+                    uint index = Convert.ToUInt32(disk["Index"] ?? 0);
                     string deviceId = index.ToString();
-                    string model = disk["Model"]?.ToString() ?? "N/A";
+                    string model = disk["Model"]?.ToString()?.Trim() ?? "N/A";
                     string iface = disk["InterfaceType"]?.ToString() ?? "";
                     double sizeGB = disk["Size"] is ulong sz
                         ? Math.Round(sz / 1024d / 1024d / 1024d, 1)
                         : 0;
                     string letters = GetDriveLetters(disk["DeviceID"]?.ToString());
-                    bool isSystem = letters.Split(' ').Contains("C:");  // Определяет, содержит ли диск системный раздел 'C:'
+                    bool isSystem = !string.IsNullOrEmpty(letters) && letters.Split(' ').Contains("C:");
 
                     string deviceType;
                     if (iface.Equals("USB", StringComparison.OrdinalIgnoreCase))
                     {
                         deviceType = "USB";
                     }
-                    // Определяет тип диска на основе интерфейса или данных MSFT_PhysicalDisk, с запасным вариантом по имени модели
                     else if (physDisks.TryGetValue(deviceId, out var pd))
                     {
                         if (pd.MediaType == 4)
@@ -839,29 +869,42 @@ namespace ModuleInfo
                     if (deviceType != "USB")
                     {
                         WriteInfo($"Системный диск: {(isSystem ? "Да" : "Нет")}", isSubItem: true, subItemClass: "disk");
-                        var cleanName = model.Replace(" ATA Device", "").Trim();
-                        if (storageTemps.TryGetValue(cleanName, out var t))
+
+                        // Ищет температуру по имени диска
+                        string? tempValue = null;
+                        string cleanName = model.Replace(" ATA Device", "").Trim();
+
+                        if (!string.IsNullOrEmpty(cleanName))
                         {
-                            // Если температура HDD от 55°C, а SSD от 60°C, выделяет жирным красным цветом в отчёте
-                            bool isHighTemp = (deviceType == "HDD" && t >= 55) || (deviceType == "SSD" && t >= 60);
-                            WriteInfo($"Температура: {t}°C", isSubItem: true, subItemClass: $"disk {(isHighTemp ? "highlight-red" : "")}");
-                        }
-                        else
-                        {
-                            var fb = storageTemps.FirstOrDefault(kv => kv.Key.Contains(cleanName));
-                            if (fb.Key != null)
+                            // Точное совпадение
+                            if (storageTemps.TryGetValue(cleanName, out var t))
                             {
-                                // Если температура HDD более 55°C, а SSD более 60°C, выделяет жирным красным цветом в отчёте
-                                bool isHighTemp = (deviceType == "HDD" && fb.Value >= 55) || (deviceType == "SSD" && fb.Value >= 60);
-                                WriteInfo($"Температура: {fb.Value}°C", isSubItem: true, subItemClass: $"disk {(isHighTemp ? "highlight-red" : "")}");
+                                tempValue = t.ToString();
                             }
                             else
                             {
-                                WriteInfo("Температура: N/A", isSubItem: true, subItemClass: "disk");
+                                // Частичное совпадение
+                                var match = storageTemps.FirstOrDefault(kv =>
+                                    kv.Key.Contains(cleanName) || cleanName.Contains(kv.Key));
+                                if (match.Key != null)
+                                {
+                                    tempValue = match.Value.ToString();
+                                }
                             }
                         }
+
+                        if (tempValue != null && float.TryParse(tempValue, out float temp))
+                        {
+                            bool isHighTemp = (deviceType == "HDD" && temp >= 55) || (deviceType == "SSD" && temp >= 60);
+                            WriteInfo($"Температура: {temp}°C", isSubItem: true,
+                                subItemClass: $"disk {(isHighTemp ? "highlight-red" : "")}");
+                        }
+                        else
+                        {
+                            WriteInfo("Температура: N/A", isSubItem: true, subItemClass: "disk");
+                        }
                     }
-                    // Добавляет абзац после каждого диска (кроме последнего), для лучшей читаемости отчёта
+
                     if (i < totalDisks - 1)
                     {
                         htmlContent.AppendLine("<br class='disk'>");

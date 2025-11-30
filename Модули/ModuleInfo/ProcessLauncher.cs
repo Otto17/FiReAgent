@@ -22,28 +22,29 @@ namespace ModuleInfo
         // LaunchProcessInActiveSession запускает процесс в активном сеансе и ожидает его завершения
         internal static bool LaunchProcessInActiveSession(string arguments, string? applicationName)
         {
-            // Получает идентификатор сессии консоли, чтобы найти активного пользователя
-            uint sessionId = WTSGetActiveConsoleSessionId();
-            if (sessionId == 0xFFFFFFFF)    // Указывает, что нет активного пользователя
+            uint? sessionId = FindActiveSessionWithToken();
+
+            if (!sessionId.HasValue)
             {
-                Logging.WriteToLogFile("Активный сеанс не найден.");
+                Logging.WriteToLogFile("Не найден активный сеанс с доступным токеном пользователя. " +
+                    "Пользователь не вошёл в систему или сеанс заблокирован.");
                 return false;
             }
 
-            if (!WTSQueryUserToken(sessionId, out IntPtr userToken))
+            if (!WTSQueryUserToken(sessionId.Value, out IntPtr userToken))
             {
                 int error = Marshal.GetLastWin32Error();
-                Logging.WriteToLogFile("WTSQueryUserToken не удался. Ошибка: " + error);
+                Logging.WriteToLogFile($"WTSQueryUserToken не удался для сеанса {sessionId.Value}. Ошибка: {error}");
                 return false;
             }
 
             if (!DuplicateTokenEx(
-                userToken,
-                TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY,
-                IntPtr.Zero,
-                SecurityImpersonation,
-                TokenPrimary,
-                out IntPtr primaryToken))
+               userToken,
+               TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY,
+               IntPtr.Zero,
+               SecurityImpersonation,
+               TokenPrimary,
+               out IntPtr primaryToken))
             {
                 // Используется для получения первичного токена, необходимого для CreateProcessAsUser
                 int error = Marshal.GetLastWin32Error();
@@ -59,7 +60,7 @@ namespace ModuleInfo
             }
 
             // Готовит STARTUPINFO и вызывает CreateProcessAsUser
-            STARTUPINFO si = new() { cb = Marshal.SizeOf<STARTUPINFO>(), lpDesktop = "winsta0\\default" }; // Указывает, что процесс должен быть виден на рабочем столе
+            STARTUPINFO si = new() { cb = Marshal.SizeOf<STARTUPINFO>(), lpDesktop = "winsta0\\default" };
             string cmdLine = $"\"{applicationName}\" {arguments}";
             bool result = CreateProcessAsUser(
                 primaryToken,
@@ -72,7 +73,7 @@ namespace ModuleInfo
                 envBlock,
                 Environment.CurrentDirectory,
                 ref si,
-                out PROCESS_INFORMATION pi); ;
+                out PROCESS_INFORMATION pi);
 
             if (!result)
             {
@@ -97,7 +98,86 @@ namespace ModuleInfo
         }
 
 
+        // FindActiveSessionWithToken ищет активный сеанс с доступным токеном
+        private static uint? FindActiveSessionWithToken()
+        {
+            // Сначала пробует консольный сеанс (самый частый случай)
+            uint consoleSession = WTSGetActiveConsoleSessionId();
+            if (consoleSession != 0xFFFFFFFF)
+            {
+                if (WTSQueryUserToken(consoleSession, out IntPtr token))
+                {
+                    CloseHandle(token);
+                    return consoleSession;
+                }
+            }
+
+            // Перебирает все сеансы для поиска активного
+            if (!WTSEnumerateSessions(IntPtr.Zero, 0, 1, out IntPtr sessionInfoPtr, out int sessionCount))
+            {
+                return null;
+            }
+
+            try
+            {
+                int structSize = Marshal.SizeOf<WTS_SESSION_INFO>();
+
+                // Первый проход: ищет активные сеансы
+                for (int i = 0; i < sessionCount; i++)
+                {
+                    IntPtr currentPtr = IntPtr.Add(sessionInfoPtr, i * structSize);
+                    var sessionInfo = Marshal.PtrToStructure<WTS_SESSION_INFO>(currentPtr);
+
+                    if (sessionInfo.State == WTS_CONNECTSTATE_CLASS.WTSActive &&
+                        sessionInfo.SessionId != 0)
+                    {
+                        if (WTSQueryUserToken(sessionInfo.SessionId, out IntPtr token))
+                        {
+                            CloseHandle(token);
+                            return sessionInfo.SessionId;
+                        }
+                    }
+                }
+
+                // Второй проход: ищет подключённые сеансы (RDP и т.д.)
+                for (int i = 0; i < sessionCount; i++)
+                {
+                    IntPtr currentPtr = IntPtr.Add(sessionInfoPtr, i * structSize);
+                    var sessionInfo = Marshal.PtrToStructure<WTS_SESSION_INFO>(currentPtr);
+
+                    if (sessionInfo.State == WTS_CONNECTSTATE_CLASS.WTSConnected &&
+                        sessionInfo.SessionId != 0)
+                    {
+                        if (WTSQueryUserToken(sessionInfo.SessionId, out IntPtr token))
+                        {
+                            CloseHandle(token);
+                            return sessionInfo.SessionId;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                WTSFreeMemory(sessionInfoPtr);
+            }
+
+            return null;
+        }
+
         // --- P/Invoke для работы с процессами и сеансами --- //
+
+        // Перечисляет все сеансы на сервере терминалов (локально или удалённо)
+        [DllImport("Wtsapi32.dll", SetLastError = true)]
+        private static extern bool WTSEnumerateSessions(
+        IntPtr hServer,
+        int Reserved,
+        int Version,
+        out IntPtr ppSessionInfo,
+        out int pCount);
+
+        // Освобождает память, выделенную функциями WTS
+        [DllImport("Wtsapi32.dll")]
+        private static extern void WTSFreeMemory(IntPtr pMemory);
 
         // Перечисляет все мониторы, подключенные к системе
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
@@ -161,6 +241,30 @@ namespace ModuleInfo
 
 
         // --- Структуры --- //
+
+        // WTS_CONNECTSTATE_CLASS описывает состояние сеанса
+        private enum WTS_CONNECTSTATE_CLASS
+        {
+            WTSActive = 0,          // Пользователь вошёл и активен
+            WTSConnected = 1,       // Подключён, но не активен
+            WTSConnectQuery = 2,
+            WTSShadow = 3,
+            WTSDisconnected = 4,    // Отключён, но сеанс сохранён
+            WTSIdle = 5,
+            WTSListen = 6,          // Слушающий сеанс (RDP listener)
+            WTSReset = 7,
+            WTSDown = 8,
+            WTSInit = 9
+        }
+
+        // WTS_SESSION_INFO хранит информацию о сеансе
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WTS_SESSION_INFO
+        {
+            public uint SessionId;                  // Идентификатор сеанса
+            public IntPtr pWinStationName;          // Имя станции (Console, RDP-Tcp#0 и т.д.)
+            public WTS_CONNECTSTATE_CLASS State;    // Текущее состояние сеанса
+        }
 
         // DISPLAY_DEVICE хранит информацию о дисплейном устройствее
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]

@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	CurrentVersion = "26.11.25" // Текущая версия ClientUpdater в формате "дд.мм.гг"
+	CurrentVersion = "30.11.25" // Текущая версия ClientUpdater в формате "дд.мм.гг"
 
 	exeName         = "FiReAgent.exe"                                                 // Главный исполняемый файл агента, который будет останавливаться (служба) пред обновлением и запускаться после
 	zipAssetPattern = `^FiReAgent-([0-9]{2}\.[0-9]{2}\.[0-9]{2})-windows-amd64\.zip$` // Шаблон имени ZIP-ассета релиза "FiReAgent-дд.мм.гг-windows-amd64.zip"
@@ -126,104 +126,143 @@ func run(conf UpdaterConf) error {
 		return fmt.Errorf("ClientUpdater должен запускаться только из %q", baseDir)
 	}
 
-	// Читает историю обновлений для определения локальной версии
+	// Временная папка для работы
+	tmpDir := filepath.Join(exeDir(), tmpDirName)
+
+	// Читает историю обновлений для определения локальной (текущей) версии
 	hist, err := readUpdateHistory(conf.UpdateDir)
 	if err != nil {
-		// Предупреждение о неудачном чтении истории
-		log.Printf("Предупреждение: не удалось прочитать update_history.json: %v", err)
+		// Предупреждение о неудачном чтении JSON истории
+		log.Printf("Предупреждение: не удалось прочитать \"update_history.json\": %v", err)
 	}
 	localVer := strings.TrimSpace(hist.Last)
 	if localVer == "" {
 		localVer = "00.00.00"
 	}
 
-	// Проверяет наличие новой версии в репозитории
+	// Проверяет наличие новых версий (возвращает список)
 	ctx, cancel := context.WithTimeout(context.Background(), checkTimeout)
 	defer cancel()
-	meta, trace, err := CheckLatest(ctx, conf.PrimaryRepo, conf.GHURL, conf.GFURL, conf.GFToken)
-	if err != nil {
-		fmt.Println("Обновлений нет.")
-		return nil
-	}
-	if !isRemoteNewer(localVer, meta.RemoteVersion) {
+
+	// Получает список обновлений
+	updates, trace, err := CheckUpdates(ctx, localVer, conf.PrimaryRepo, conf.GHURL, conf.GFURL, conf.GFToken)
+	if err != nil || len(updates) == 0 {
+		// Если список пуст или ошибка - просто выходит, обновлений нет
 		fmt.Println("Обновлений нет.")
 		return nil
 	}
 
-	// Переключается на файловое логирование, поскольку обновление подтверждено
+	// Переключение на файловое логирование
 	ClientUpdaterLogging()
 	defer LogBlankLines(2)
 
-	// Теперь пишет подробности в лог
-	log.Printf("Локальная версия (из JSON): %s", localVer)
+	log.Printf("Локальная версия: %s. Найдено обновлений: %d", localVer, len(updates))
 
-	// Выгружает трассировку фоллбэков (если использовались)
+	// Выгружает трассировку
 	for _, msg := range trace {
 		log.Printf("%s", msg)
 	}
-	log.Printf("Доступна новая версия: %s (ассет: %s)", meta.RemoteVersion, meta.AssetName)
 
-	// Создаёт временную директорию и настраивает отложенное удаление
-	tmpDir := filepath.Join(exeDir(), tmpDirName)
-	defer func() {
-		if err := os.RemoveAll(tmpDir); err != nil {
-			log.Printf("Предупреждение: не удалось удалить tmp: %v", err)
-		}
-	}()
-	_ = os.RemoveAll(tmpDir)
-	if err := os.MkdirAll(tmpDir, 0755); err != nil {
-		return fmt.Errorf("не удалось создать tmp: %w", err)
+	// Выводит план обновлений
+	for i, u := range updates {
+		log.Printf("  %d. Версия %s (от %s)", i+1, u.RemoteVersion, u.Repo)
 	}
 
-	assetPath := filepath.Join(tmpDir, meta.AssetName)
-	log.Printf("Скачивание: %s → %s", meta.AssetURL, assetPath)
-
-	headers := map[string]string{}
-
-	// Добавляет заголовок авторизации, если используется GitFlic и токен доступен
-	if strings.EqualFold(meta.Repo, "gitflic") && strings.TrimSpace(conf.GFToken) != "" {
-		headers["Authorization"] = "token " + strings.TrimSpace(conf.GFToken)
-	}
-	if err := downloadWithChecksum(meta.AssetURL, assetPath, meta.ExpectedSHA, headers); err != nil {
-		return fmt.Errorf("скачивание не удалось: %w", err)
-	}
-
-	extractDir := filepath.Join(tmpDir, "unpacked")
-	if err := unzipAll(assetPath, extractDir); err != nil {
-		return fmt.Errorf("ошибка распаковки: %w", err)
-	}
-	log.Printf("Распаковано: %s", extractDir)
-
-	// Загружает манифест обновления из распакованного архива
-	man, err := loadManifest(filepath.Join(extractDir, "update.toml"))
-	if err != nil {
-		return fmt.Errorf("не удалось прочитать update.toml: %w", err)
-	}
-	if strings.TrimSpace(man.Version) != "" {
-		log.Printf("Манифест версии: %s", man.Version)
-	}
-
-	// Останавливает службу и удаляет её (ключ "-sd")
+	// Определяет путь к FiReAgent
 	exePath := filepath.Join(baseDir, exeName)
+
+	// ЭТАП 1: Остановка службы (Один раз перед всеми обновлениями)
 	if err := runCmdTimeout(exePath, cmdTimeout, "-sd"); err != nil {
 		log.Printf("Предупреждение: FiReAgent -sd завершился с ошибкой (возможно, служба не установлена): %v", err)
 	} else {
 		log.Printf("FiReAgent остановлен и служба удалена.")
 	}
 
-	// Применяет операции обновления, описанные в манифесте
-	// selfUpdatePending будет true, если ClientUpdater был обновлен (создан _new.exe)
-	selfUpdatePending, err := applyOperations(extractDir, baseDir, man)
-	if err != nil {
-		return fmt.Errorf("ошибка применения обновления: %w", err)
+	// Запуск FiReAgent в конце работы (или при ошибке)
+	defer func() {
+		log.Println("Инициализация запуска FiReAgent (-is)...")
+		// Попытка запустить службу
+		if err := runCmdTimeout(exePath, cmdTimeout, "-is"); err != nil {
+			log.Printf("КРИТИЧЕСКАЯ ОШИБКА: Не удалось перезапустить FiReAgent: %v", err)
+		} else {
+			log.Printf("FiReAgent успешно запущен (-is).")
+		}
+
+		// Удаление tmp папки в самом конце
+		time.Sleep(200 * time.Millisecond)
+		if err := removeTmpDir(tmpDir); err != nil {
+			log.Printf("Предупреждение: не удалось удалить tmp в конце работы: %v", err)
+		}
+	}()
+
+	// ЭТАП 2: Поэтапная установка версий
+	selfUpdatePending := false
+
+	for i, meta := range updates {
+		log.Printf(">>> Установка обновления %d из %d: версия %s <<<", i+1, len(updates), meta.RemoteVersion)
+
+		// Очистка временной папки перед каждым этапом
+		if err := removeTmpDir(tmpDir); err != nil {
+			log.Printf("Предупреждение: ошибка очистки tmp перед версией %s: %v", meta.RemoteVersion, err)
+		}
+		if err := os.MkdirAll(tmpDir, 0755); err != nil {
+			return fmt.Errorf("не удалось создать tmp: %w", err)
+		}
+
+		// Скачивание релиза
+		assetPath := filepath.Join(tmpDir, meta.AssetName)
+		log.Printf("Скачивание: %s", meta.AssetURL)
+		headers := map[string]string{}
+		if strings.EqualFold(meta.Repo, "gitflic") && strings.TrimSpace(conf.GFToken) != "" {
+			headers["Authorization"] = "token " + strings.TrimSpace(conf.GFToken)
+		}
+		if err := downloadWithChecksum(meta.AssetURL, assetPath, meta.ExpectedSHA, headers); err != nil {
+			return fmt.Errorf("ошибка скачивания версии %s: %w", meta.RemoteVersion, err)
+		}
+
+		// Распаковка архива
+		extractDir := filepath.Join(tmpDir, "unpacked")
+		if err := unzipAll(assetPath, extractDir); err != nil {
+			return fmt.Errorf("ошибка распаковки версии %s: %w", meta.RemoteVersion, err)
+		}
+
+		// Поиск манифеста
+		updateRoot, err := findUpdateRoot(extractDir)
+		if err != nil {
+			return fmt.Errorf("update.toml не найден в версии %s: %w", meta.RemoteVersion, err)
+		}
+		man, err := loadManifest(filepath.Join(updateRoot, "update.toml"))
+		if err != nil {
+			return fmt.Errorf("ошибка чтения манифеста версии %s: %w", meta.RemoteVersion, err)
+		}
+
+		// Применение обновления
+		// selfUpdatePending обновляется на каждой итерации, если хоть одна версия требует самообновления - флаг будет true (фактически, последняя версия перезапишет _new.exe)
+		isSelf, err := applyOperations(updateRoot, baseDir, man)
+		if err != nil {
+			return fmt.Errorf("сбой установки версии %s: %w", meta.RemoteVersion, err)
+		}
+		if isSelf {
+			selfUpdatePending = true
+		}
+
+		// Обновление истории (после каждого успешного шага)
+		if err := appendUpdateHistory(conf.UpdateDir, meta.RemoteVersion, meta.Repo); err != nil {
+			log.Printf("Предупреждение: не удалось обновить историю для %s: %v", meta.RemoteVersion, err)
+		}
+
+		// Обновление реестра (после каждого успешного шага)
+		if err := updateRegistryVersion(meta.RemoteVersion); err != nil {
+			log.Printf("Предупреждение: не удалось обновить реестр для %s: %v", meta.RemoteVersion, err)
+		} else {
+			log.Printf("Реестр Windows обновлён: %s", meta.RemoteVersion)
+		}
+
+		log.Printf("Версия %s успешно установлена.", meta.RemoteVersion)
+		LogBlankLines(1)
 	}
 
-	// Запускает агента и устанавливает службу (ключ "-is")
-	if err := runCmdTimeout(exePath, cmdTimeout, "-is"); err != nil {
-		return fmt.Errorf("не удалось запустить FiReAgent (-is): %w", err)
-	}
-	log.Printf("FiReAgent запущен (-is).")
-
+	// ЭТАП 3: Завершение
 	// Если было запланировано самообновление
 	if selfUpdatePending {
 		myExe, _ := os.Executable()
@@ -232,31 +271,13 @@ func run(conf UpdaterConf) error {
 		scheduleSelfUpdate(newExe, myExe)
 	}
 
-	// Обновляет локальную историю обновлений
-	if err := appendUpdateHistory(conf.UpdateDir, meta.RemoteVersion, meta.Repo); err != nil {
-		log.Printf("Предупреждение: не удалось обновить историю: %v", err)
-	}
-
-	fmt.Println("Обновление выполнено успешно.")
-	return nil
+	fmt.Println("Все обновления выполнены успешно.")
+	return nil // Сработает defer, запустив FiReAgent и удалит tmp
 }
 
 // -------------------------------------------------------------
 // Вспомогательные функции
 // -------------------------------------------------------------
-
-// isRemoteNewer сравнивает две версии в формате "дд.мм.гг"
-func isRemoteNewer(local, remote string) bool {
-	lt, err1 := time.Parse("02.01.06", strings.TrimSpace(local))
-	rt, err2 := time.Parse("02.01.06", strings.TrimSpace(remote))
-	if err2 != nil {
-		return false // Если удалённую версию не удалось распарсить, обновления нет
-	}
-	if err1 != nil {
-		return true // Если локальную версию не удалось распарсить, считаем удаленную новее
-	}
-	return rt.After(lt)
-}
 
 // runCmdTimeout выполняет команду с указанным тайм-аутом, захватывая вывод
 func runCmdTimeout(path string, timeout time.Duration, args ...string) error {
@@ -338,7 +359,7 @@ func unzipAll(zipPath, dst string) error {
 
 // sanitizeZipEntry фильтрует записи ZIP-архива, разрешая только безопасные пути и файлы агента
 func sanitizeZipEntry(f *zip.File) (rel string, isDir bool, ok bool) {
-	n := normalizeZipEntryName(f) // Использует нормализованное имя
+	n := normalizeZipEntryName(f) // Использование нормализованного имени
 	n = strings.ReplaceAll(n, "\\", "/")
 	n = strings.TrimSpace(n)
 	if n == "" {
@@ -356,17 +377,31 @@ func sanitizeZipEntry(f *zip.File) (rel string, isDir bool, ok bool) {
 		return "", false, false
 	}
 
-	if strings.EqualFold(clean, "update.toml") {
+	low := strings.ToLower(clean)
+	parts := strings.Split(low, "/")
+
+	// Паттерн 1: update.toml в корне
+	if len(parts) == 1 && parts[0] == "update.toml" {
 		return filepath.FromSlash(clean), false, true
 	}
-	low := strings.ToLower(clean)
 
-	// Разрешает только файлы внутри подкаталога "fireagent/" или "update.toml"
-	if strings.HasPrefix(low, "fireagent/") {
-		// Определяет "директорность" по нормализованному 'n'
+	// Паттерн 2: корневая_папка/update.toml (архив с корневой директорией)
+	if len(parts) == 2 && parts[1] == "update.toml" {
+		return filepath.FromSlash(clean), false, true
+	}
+
+	// Паттерн 3: fireagent/... в корне
+	if len(parts) >= 1 && parts[0] == "fireagent" {
 		isDir = strings.HasSuffix(n, "/") || f.FileInfo().IsDir()
 		return filepath.FromSlash(clean), isDir, true
 	}
+
+	// Паттерн 4: корневая_папка/fireagent/... (архив с корневой директорией)
+	if len(parts) >= 2 && parts[1] == "fireagent" {
+		isDir = strings.HasSuffix(n, "/") || f.FileInfo().IsDir()
+		return filepath.FromSlash(clean), isDir, true
+	}
+
 	return "", false, false
 }
 
@@ -426,4 +461,96 @@ func scoreCyr(s string) int {
 // pathEqualFold сравнивает два пути без учета регистра после очистки
 func pathEqualFold(a, b string) bool {
 	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+}
+
+// removeTmpDir удаляет временную tmp папку
+func removeTmpDir(tmpDir string) error {
+	// Проверяет, существует ли папка
+	info, err := os.Stat(tmpDir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return os.Remove(tmpDir)
+	}
+
+	// Собирает все пути для удаления
+	var files []string
+	var dirs []string
+
+	_ = filepath.Walk(tmpDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || path == tmpDir {
+			return nil
+		}
+		if info.IsDir() {
+			dirs = append(dirs, path)
+		} else {
+			files = append(files, path)
+		}
+		return nil
+	})
+
+	// Удаляет все файлы
+	for _, f := range files {
+		for range 3 {
+			if err := os.Remove(f); err == nil || os.IsNotExist(err) {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+	// Удаляет папки в обратном порядке (сначала вложенные)
+	for i := len(dirs) - 1; i >= 0; i-- {
+		for range 3 {
+			if err := os.Remove(dirs[i]); err == nil || os.IsNotExist(err) {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+	// Удаляет корневую tmp папку
+	for range 5 {
+		if err := os.Remove(tmpDir); err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
+		return nil
+	}
+	return fmt.Errorf("не удалось удалить папку: %s", tmpDir)
+}
+
+// findUpdateRoot ищет "update.toml" в распакованной директории и возвращает путь к корню обновления
+func findUpdateRoot(extractDir string) (string, error) {
+	// Сначала проверяет корень
+	tomlPath := filepath.Join(extractDir, "update.toml")
+	if _, err := os.Stat(tomlPath); err == nil {
+		return extractDir, nil
+	}
+
+	// Ищет в подпапках первого уровня
+	entries, err := os.ReadDir(extractDir)
+	if err != nil {
+		return "", err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		subDir := filepath.Join(extractDir, entry.Name())
+		tomlPath := filepath.Join(subDir, "update.toml")
+		if _, err := os.Stat(tomlPath); err == nil {
+			return subDir, nil
+		}
+	}
+
+	return "", fmt.Errorf("update.toml не найден в %s и его подпапках", extractDir)
 }

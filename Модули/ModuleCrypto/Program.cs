@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2025 Otto
+﻿// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 using System;
@@ -20,7 +20,7 @@ namespace ModuleCrypto
 {
     internal class Program
     {
-        private const string CurrentVersion = "26.11.25"; // Текущая версия ModuleCrypto в формате "дд.мм.гг"
+        private const string CurrentVersion = "01.02.25"; // Текущая версия ModuleCrypto в формате "дд.мм.гг"
 
         internal static void Main(string[] args)
         {
@@ -69,6 +69,18 @@ namespace ModuleCrypto
                     return;
                 }
 
+                // Определение режима работы через именованный канал
+                bool pipeMode = args.Any(arg => arg == "--pipe");
+                string pipeName = "FiReMQ_Crypto_Pipe";
+                foreach (var arg in args)
+                {
+                    if (arg.StartsWith("--pipename="))
+                    {
+                        pipeName = arg.Substring("--pipename=".Length);
+                        break;
+                    }
+                }
+
                 // Определение путей к конфигурационным файлам
                 string executablePath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
                 string configFolder = Path.Combine(executablePath, "config");
@@ -99,21 +111,39 @@ namespace ModuleCrypto
                 if (certificates.Count == 0)
                 {
                     Logging.WriteToLogFile("Сертификат с CN 'CryptoAgent' не найден.");
+                    if (pipeMode)
+                    {
+                        SendPipeStatus(pipeName, "CERT_NOT_FOUND");
+                    }
                     return;
                 }
 
                 X509Certificate2 cert = certificates[0];
                 store.Close();
 
-                // Генерация имени канала из аргументов
-                string pipeName = "FiReMQ_Crypto_Pipe";
-                foreach (var arg in args)
+                // "Прогрев" криптографических провайдеров Windows (первое обращение к RSA на холодном старте Windows 8.1 может занять около 20 секунд)
+                try
                 {
-                    if (arg.StartsWith("--pipename="))
+                    // Получение приватного ключа инициализирует криптографические провайдеры
+                    using RSA rsa = cert.GetRSAPrivateKey();
+                    // Выполняет минимальную операцию для полной инициализации провайдера
+                    if (rsa != null)
                     {
-                        pipeName = arg.Substring("--pipename=".Length);
-                        break;
+                        byte[] testData = new byte[32];
+                        try
+                        {
+                            // Попытка подписи инициализирует все внутренние структуры
+                            rsa.SignData(testData, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                        }
+                        catch
+                        {
+                            // Игнорирование ошибок - главное, что бы провайдер загрузился
+                        }
                     }
+                }
+                catch (Exception)
+                {
+                    //Logging.WriteToLogFile($"[DEBUG] Ошибка прогрева криптографии: {ex.Message} (продолжение работы)");
                 }
 
                 // Проверяет наличие незашифрованных PEM-файлов
@@ -121,8 +151,6 @@ namespace ModuleCrypto
 
                 // Проверяет наличие зашифрованных файлов
                 bool encryptedFilesExist = File.Exists(aesKeyEnc) && File.Exists(clientCertEnc) && File.Exists(clientKeyEnc) && File.Exists(caCertEnc);
-
-                bool pipeMode = args.Any(arg => arg == "--pipe");
 
                 // Шифрование PEM-файлов при их наличии
                 if (plainFilesExist)
@@ -222,12 +250,29 @@ namespace ModuleCrypto
                             File.Delete(encryptedAuthFilePath);
                             File.Delete(authAesKeyEnc);
                             Logging.WriteToLogFile("Обнаружена несовместимость ключей. Конфиги сброшены.");
+                            if (pipeMode)
+                            {
+                                SendPipeStatus(pipeName, "CONFIG_ERROR");
+                            }
                             return;
                         }
                     }
 
                     // Дешифровка только если ключ валиден
-                    string authContent = DecryptAuthFile(encryptedAuthFilePath, aesKey);
+                    string authContent;
+                    try
+                    {
+                        authContent = DecryptAuthFile(encryptedAuthFilePath, aesKey);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logging.WriteToLogFile($"Ошибка расшифровки auth.enc: {ex.Message}");
+                        if (pipeMode)
+                        {
+                            SendPipeStatus(pipeName, "CONFIG_ERROR");
+                        }
+                        return;
+                    }
                     ParseAuthContent(authContent, out serverURL, out portMQTT, out loginMQTT, out passwordMQTT, out portQUIC);
                 }
                 else
@@ -266,6 +311,12 @@ namespace ModuleCrypto
                     // Передаёт режим (mode) в HandlePipeMode
                     HandlePipeMode(pipeName, aesKeyEnc, clientCertEnc, clientKeyEnc, caCertEnc, serverURL ?? "", portMQTT ?? "8783", loginMQTT ?? "", passwordMQTT ?? "", portQUIC ?? "4242", cert, mode);
                 }
+                else if (pipeMode && !encryptedFilesExist)
+                {
+                    // Отправляет статус ошибки через pipe, если файлы сертификатов отсутствуют
+                    Logging.WriteToLogFile("Необходимые зашифрованные файлы сертификатов отсутствуют.");
+                    SendPipeStatus(pipeName, "CERTS_MISSING");
+                }
                 else if (encryptedFilesExist)
                 {
                     // Вызывает обычный режим, если не запрошен Pipe Mode, но файлы уже зашифрованы
@@ -282,6 +333,52 @@ namespace ModuleCrypto
             }
         }
 
+        // SendPipeStatus отправляет статус через именованный канал (для уведомления FiReAgent об ошибках)
+        private static void SendPipeStatus(string pipeName, string status)
+        {
+            try
+            {
+                var pipeSecurity = new PipeSecurity();
+                var identity = WindowsIdentity.GetCurrent();
+                pipeSecurity.AddAccessRule(new PipeAccessRule(
+                    identity.User,
+                    PipeAccessRights.ReadWrite,
+                    AccessControlType.Allow
+                ));
+
+                using var pipeServer = new NamedPipeServerStream(
+                    pipeName,
+                    PipeDirection.InOut,
+                    1,
+                    PipeTransmissionMode.Byte,
+                    PipeOptions.None,
+                    0,
+                    0,
+                    pipeSecurity);
+                var connectTask = System.Threading.Tasks.Task.Run(() => pipeServer.WaitForConnection());
+                if (!connectTask.Wait(TimeSpan.FromSeconds(10)))
+                {
+                    return;
+                }
+
+                using (var writer = new BinaryWriter(pipeServer, System.Text.Encoding.UTF8, leaveOpen: true))
+                {
+                    WriteData(writer, status);
+                    writer.Flush();
+                }
+
+                var waitStart = DateTime.UtcNow;
+                while (pipeServer.IsConnected && (DateTime.UtcNow - waitStart).TotalSeconds < 5)
+                {
+                    System.Threading.Thread.Sleep(50);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logging.WriteToLogFile($"Ошибка отправки статуса: {ex.Message}");
+            }
+        }
+
         // HandlePipeMode реализует режим работы через именованный канал для передачи расшифрованного конфига
         private static void HandlePipeMode(string pipeName, string aesKeyEnc, string clientCertEnc, string clientKeyEnc, string caCertEnc, string serverURL, string portMQTT, string loginMQTT, string passwordMQTT, string portQUIC, X509Certificate2 cert, string mode)
         {
@@ -292,6 +389,7 @@ namespace ModuleCrypto
                 {
                     Console.WriteLine("Необходимые зашифрованные файлы отсутствуют.");
                     Logging.WriteToLogFile("Необходимые зашифрованные файлы отсутствуют.");
+                    SendPipeStatus(pipeName, "CERTS_MISSING");
                     return;
                 }
 
@@ -309,7 +407,17 @@ namespace ModuleCrypto
 
                 // Расшифровывает AES-ключа
                 byte[] encryptedAesKey = File.ReadAllBytes(aesKeyEnc);
-                byte[] aesKey = privateRsa.Decrypt(encryptedAesKey, RSAEncryptionPadding.OaepSHA256);
+                byte[] aesKey;
+                try
+                {
+                    aesKey = privateRsa.Decrypt(encryptedAesKey, RSAEncryptionPadding.OaepSHA256);
+                }
+                catch (Exception ex)
+                {
+                    Logging.WriteToLogFile($"Ошибка расшифровки AES-ключа (aeskey.enc): {ex.Message}");
+                    SendPipeStatus(pipeName, "DECRYPT_ERROR");
+                    return;
+                }
 
                 // Расшифровывает сертификаты
                 string clientCert, clientKey, caCert;
@@ -322,6 +430,7 @@ namespace ModuleCrypto
                 catch (Exception ex)
                 {
                     Logging.WriteToLogFile($"Ошибка расшифровки сертификатов: {ex.Message}");
+                    SendPipeStatus(pipeName, "DECRYPT_ERROR");
                     return;
                 }
 
@@ -349,37 +458,50 @@ namespace ModuleCrypto
                 {
                     try
                     {
-                        pipeServer.WaitForConnection(); // Ожидает подключения клиента
+                        // Асинхронное ожидание с таймаутом для предотвращения зависания
+                        var connectTask = System.Threading.Tasks.Task.Run(() => pipeServer.WaitForConnection());
+                        bool connected = connectTask.Wait(TimeSpan.FromSeconds(10));
+
+                        if (!connected)
+                        {
+                           // Logging.WriteToLogFile("Таймаут ожидания подключения клиента (10 сек). Завершение.");
+                            return;
+                        }
+
                         Console.WriteLine("Канал подключен.");
 
-                        // Передача данных через канал
-                        using (var writer = new BinaryWriter(pipeServer))
+                        // Передача данных через канал (leaveOpen: true предотвращает закрытие pipeServer)
+                        using (var writer = new BinaryWriter(pipeServer, System.Text.Encoding.UTF8, leaveOpen: true))
                         {
+                            // Отправляет статус "OK" первым сообщением для подтверждения готовности
+                            WriteData(writer, "OK");
+                            
                             // В режиме "full" передаёт все 8 значений (без QUIC-порта)
                             if (mode == "full")
                             {
+                                WriteData(writer, serverURL);       // URL
+                                WriteData(writer, portMQTT);        // TCP порт MQTT
+                                WriteData(writer, loginMQTT);       // Логин
+                                WriteData(writer, passwordMQTT);    // Пароль
+                                WriteData(writer, mqtt_id);         // ID для MQTT
+                                WriteData(writer, caCert);          // CA сертификат
+                                WriteData(writer, clientCert);      // Клиентский сертификат
+                                WriteData(writer, clientKey);       // Клиентский ключ
+                            }
+                            else // В режиме "half" возвращает только URL, порт QUIC и сертификаты
+                            {
                                 WriteData(writer, serverURL);   // URL
-                                WriteData(writer, portMQTT);    // TCP порт MQTT
-                                WriteData(writer, loginMQTT);   // Логин
-                                WriteData(writer, passwordMQTT);// Пароль
-                                WriteData(writer, mqtt_id);     // ID для MQTT
+                                WriteData(writer, portQUIC);    // UDP порт QUIC (только в half)
                                 WriteData(writer, caCert);      // CA сертификат
                                 WriteData(writer, clientCert);  // Клиентский сертификат
                                 WriteData(writer, clientKey);   // Клиентский ключ
                             }
-                            else // В режиме "half" возвращает только URL, порт QUIC и сертификаты
-                            {
-                                WriteData(writer, serverURL);  // URL
-                                WriteData(writer, portQUIC);   // UDP порт QUIC (только в half)
-                                WriteData(writer, caCert);     // CA сертификат
-                                WriteData(writer, clientCert); // Клиентский сертификат
-                                WriteData(writer, clientKey);  // Клиентский ключ
-                            }
                             writer.Flush(); // Немедленно отправляет данные
                         }
 
-                        // Ожидает, пока клиент не закроет соединение, чтобы избежать обрыва канала
-                        while (pipeServer.IsConnected)
+                        // Ожидает, пока клиент не закроет соединение (с таймаутом 5 секунд, требуется для Windows 8.1)
+                        var waitStart = DateTime.UtcNow;
+                        while (pipeServer.IsConnected && (DateTime.UtcNow - waitStart).TotalSeconds < 5)
                         {
                             System.Threading.Thread.Sleep(50); // Небольшая задержка для проверки состояния
                         }
@@ -388,12 +510,10 @@ namespace ModuleCrypto
                     catch (UnauthorizedAccessException ex)
                     {
                         Logging.WriteToLogFile($"Ошибка доступа: {ex.Message}");
-                        File.WriteAllText("pipe_error.log", $"[{DateTime.Now}] Access error: {ex}");
                     }
                     catch (IOException ex)
                     {
                         Logging.WriteToLogFile($"Ошибка ввода-вывода: {ex.Message}");
-                        File.WriteAllText("pipe_error.log", $"[{DateTime.Now}] IO error: {ex}");
                     }
                 }
             }

@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2025 Otto
+﻿// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 #nullable enable
@@ -26,8 +26,7 @@ namespace ModuleInfo
 
             if (!sessionId.HasValue)
             {
-                Logging.WriteToLogFile("Не найден активный сеанс с доступным токеном пользователя. " +
-                    "Пользователь не вошёл в систему или сеанс заблокирован.");
+                // Активный сеанс не найден — это нормальная ситуация, если пользователь не вошёл
                 return false;
             }
 

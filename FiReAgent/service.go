@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -6,6 +6,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"time"
 	"unsafe"
@@ -38,19 +39,6 @@ func (m *MyService) Execute(args []string, r <-chan svc.ChangeRequest, changes c
 	}
 	defer release()
 
-	// Проверка наличия сертификата "CryptoAgent" в хранилище "Локальный компьютер\\Личное"
-	if ok, err := isCryptoAgentCertInstalled(); err != nil {
-		fmt.Println("Ошибка проверки сертификата 'CryptoAgent':", err)
-		changes <- svc.Status{State: svc.StopPending}
-		return
-	} else if !ok {
-		logMissingCertOnce() // Разово создаёт запись в логе ModuleCrypto
-
-		fmt.Println("Сертификат с CN 'CryptoAgent' не найден. Установите CryptoAgent.pfx (Локальный компьютер\\Личное) и перезапустите службу.")
-		changes <- svc.Status{State: svc.StopPending}
-		return
-	}
-
 	// Проверка на незаполненный config\auth.txt — корректно останавливает службу (без перезапуска SCM)
 	if stop, msg := isAuthTxtIncomplete(); stop {
 		logAuthIncompleteOnce() // Разово создаёт запись в логе ModuleCrypto
@@ -59,10 +47,16 @@ func (m *MyService) Execute(args []string, r <-chan svc.ChangeRequest, changes c
 		return
 	}
 
-	changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
-
 	// Запускает MQTT-клиент после успешной инициализации службы
-	mqttSvc := StartMQTTClient()
+	mqttSvc, err := StartMQTTClient()
+	if err != nil {
+		// Логирует ошибку и корректно останавливает службу без перезапуска SCM
+		log.Printf("Критическая ошибка: %v", err)
+		changes <- svc.Status{State: svc.StopPending}
+		return false, 0
+	}
+
+	changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
 
 	// Настраивает отправители отчетов, используя созданный MQTT клиент
 	InitReportSenders(mqttSvc)
@@ -143,8 +137,33 @@ func InstallService() {
 
 	s, err := m.OpenService(serviceName)
 	if err == nil {
-		s.Close()
-		fmt.Println("Служба уже существует")
+		// Служба существует, проверяет её состояние
+		defer s.Close()
+
+		status, err := s.Query()
+		if err != nil {
+			fmt.Println("Ошибка получения статуса службы:", err)
+			return
+		}
+
+		// Если служба уже запущена — сообщает об этом
+		if status.State == svc.Running {
+			fmt.Println("Служба уже запущена")
+			return
+		}
+
+		// Не запускает службу, если обнаружен запущенный отладочный экземпляр
+		if isAnotherInstanceRunning() {
+			fmt.Println("Служба установлена, но не запущена, так как работает отладка")
+			return
+		}
+
+		// Служба существует, но не запущена — запускает её
+		if err := s.Start(); err != nil {
+			fmt.Println("Ошибка запуска службы:", err)
+			return
+		}
+		fmt.Println("Служба запущена")
 		return
 	}
 

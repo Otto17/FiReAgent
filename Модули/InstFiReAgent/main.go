@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -18,11 +18,17 @@ import (
 const (
 	// Данные для "Удаление или изменение программы" (Установленные приложения)
 	publisher      = "Otto"     // Автор
-	CurrentVersion = "26.11.25" // Текущая версия InstFiReAgent в формате "дд.мм.гг"
+	CurrentVersion = "02.02.26" // Текущая версия InstFiReAgent в формате "дд.мм.гг"
 )
 
 func main() {
 	initColors() // initColors Инициализирует цвета консоли (включает поддержку на Windows 10+)
+
+	// Проверяет версию Windows (минимум 8.1)
+	if !isWindows81OrGreater() {
+		fmt.Fprintln(os.Stderr, ColorBrightRed+"Установка возможна начиная с Windows 8.1 и выше!"+ColorReset)
+		os.Exit(1)
+	}
 
 	// Показывает справку
 	if len(os.Args) >= 2 && (os.Args[1] == "?" || strings.EqualFold(os.Args[1], "-h") || strings.EqualFold(os.Args[1], "--help")) {

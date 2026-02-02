@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -25,7 +25,7 @@ import (
 //go:embed openssl/*
 var embeddedFS embed.FS // EmbeddedFS содержит встроенные ресурсы папки "openssl"
 
-const CurrentVersion = "26.11.25" // Текущая версия GenCryAgent в формате "дд.мм.гг"
+const CurrentVersion = "02.02.26" // Текущая версия GenCryAgent в формате "дд.мм.гг"
 
 func main() {
 	// Отображает версию GenCryAgent
@@ -86,8 +86,8 @@ func main() {
 		return
 	}
 
-	// Создание PFX (совместимый с Windows 8.1: TripleDES‑SHA1)
-	fmt.Println("2/3 Экспорт в PFX (совместимость с Windows 8.1: \"TripleDES‑SHA1\")...")
+	// Создание PFX (совместимый с Windows 8.1: TripleDES-SHA1)
+	fmt.Println("2/3 Экспорт в PFX (совместимость с Windows 8.1: \"TripleDES-SHA1\")...")
 	pfxArgs := []string{
 		"pkcs12",
 		"-export",

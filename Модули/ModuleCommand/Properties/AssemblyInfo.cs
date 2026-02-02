@@ -10,7 +10,7 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("")]
 [assembly: AssemblyProduct("ModuleCommand")]
-[assembly: AssemblyCopyright("Copyright ©  2025 Otto")]
+[assembly: AssemblyCopyright("Copyright ©  2025-2026 Otto")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 
@@ -29,5 +29,5 @@ using System.Runtime.InteropServices;
 //      Номер сборки
 //      Номер редакции
 //
-[assembly: AssemblyVersion("26.11.25")]
-[assembly: AssemblyFileVersion("26.11.25")]
+[assembly: AssemblyVersion("02.02.26")]
+[assembly: AssemblyFileVersion("02.02.26")]

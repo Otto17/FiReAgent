@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -22,7 +22,7 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-const CurrentVersion = "26.11.25" // Текущая версия ModuleQUIC в формате "дд.мм.гг"
+const CurrentVersion = "02.02.26" // Текущая версия ModuleQUIC в формате "дд.мм.гг"
 
 // ModuleData описывает структуру данных для получения всех параметров от FiReAgent
 type ModuleData struct {

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -16,7 +16,7 @@ import (
 	"golang.org/x/sys/windows/svc"
 )
 
-const CurrentVersion = "26.11.25" // Текущая версия FiReAgent в формате "дд.мм.гг"
+const CurrentVersion = "02.02.25" // Текущая версия FiReAgent в формате "дд.мм.гг"
 
 func main() {
 	// Устанавливает более агрессивный порог сборщика мусора в 20% (вместо 100% по умолчанию)
@@ -79,17 +79,6 @@ func RunAsApplication() {
 	}
 	defer release()
 
-	// Проверка наличия сертификата "CryptoAgent" в хранилище "Локальный компьютер\\Личное"
-	if ok, err := isCryptoAgentCertInstalled(); err != nil {
-		fmt.Println("Ошибка проверки сертификата 'CryptoAgent':", err)
-		return
-	} else if !ok {
-		logMissingCertOnce() // Разово создаёт запись в логе ModuleCrypto
-
-		fmt.Println("Сертификат с CN 'CryptoAgent' не найден. Установите CryptoAgent.pfx (Локальный компьютер\\Личное) и перезапустите FiReAgent.")
-		return
-	}
-
 	// Проверка на незаполненный config\auth.txt — не запускать программу дальше
 	if stop, msg := isAuthTxtIncomplete(); stop {
 		logAuthIncompleteOnce() // Разово создаёт запись в логе ModuleCrypto
@@ -98,7 +87,11 @@ func RunAsApplication() {
 	}
 
 	// Инициализирует клиент MQTT для обмена данными
-	mqttSvc := StartMQTTClient()
+	mqttSvc, err := StartMQTTClient()
+	if err != nil {
+		fmt.Printf("Критическая ошибка: %v\n", err)
+		return
+	}
 
 	// Настраивает отправители отчетов, используя созданный MQTT клиент
 	InitReportSenders(mqttSvc)

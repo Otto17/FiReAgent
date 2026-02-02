@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -34,7 +34,7 @@ func ClientUpdaterLogging() {
 	logPath := filepath.Join(dir, baseLogName)
 
 	if err := ensureLogDir(dir); err != nil {
-		log.Printf("Не удалось подготовить каталог логов %s: %v (лог только в stderr)", dir, err)
+		log.Printf("Не удалось подготовить папку логов %s: %v (лог только в stderr)", dir, err)
 		return
 	}
 
@@ -79,7 +79,7 @@ func (w *rotatingWriter) Write(p []byte) (int, error) {
 	defer w.mu.Unlock() // Гарантирует потокобезопасность операции
 
 	dir := filepath.Dir(w.path)
-	_ = ensureLogDir(dir) // Убеждается, что каталог существует перед записью
+	_ = ensureLogDir(dir) // Убеждается, что папка существует перед записью
 
 	if needRotate(w.path) {
 		_ = rotateLogs(w.path) // Выполняет ротацию, если текущий файл достиг максимального размера
@@ -93,10 +93,10 @@ func (w *rotatingWriter) Write(p []byte) (int, error) {
 	return f.Write(p)
 }
 
-// EnsureLogDir проверяет существование каталога и создает его при необходимости
+// EnsureLogDir проверяет существование папки и создаёт её при необходимости
 func ensureLogDir(dir string) error {
 	if dir == "" {
-		return fmt.Errorf("пустой каталог логов")
+		return fmt.Errorf("пустая папка логов")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -20,11 +20,13 @@ const (
 	ActDelete Action = "delete" // Операция удаления файла
 )
 
-// FileOp описывает операцию над одним файлом в процессе обновления
+// FileOp описывает операцию над одним файлом или папкой в процессе обновления
 type FileOp struct {
-	Src    string `toml:"Src"`    // Путь к файлу внутри распакованного архива
-	Dest   string `toml:"Dest"`   // Путь назначения в базовой директории "C:\Program Files\FiReAgent"
-	Action Action `toml:"Action"` // Тип выполняемого действия "update или delete"
+	Src     string `toml:"Src"`     // Путь к файлу/папке внутри распакованного архива
+	Dest    string `toml:"Dest"`    // Путь назначения в базовой директории "C:\Program Files\FiReAgent"
+	Action  Action `toml:"Action"`  // Тип выполняемого действия "update или delete"
+	IsDir   bool   `toml:"IsDir"`   // Признак папки (true - папка, false - файл)
+	Replace bool   `toml:"Replace"` // Для папок: true - удалить старое содержимое перед копированием, false - только добавить/перезаписать
 }
 
 // Manifest представляет структуру файла манифеста "update.toml"

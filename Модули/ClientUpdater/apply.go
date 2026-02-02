@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -44,7 +44,7 @@ func applyOperations(extractDir, baseDir string, man *Manifest) (bool, error) {
 			}
 			srcAbs := filepath.Clean(filepath.Join(fiRoot, srcRel))
 
-			// Проверяет, что источник находится внутри распакованного каталога FiReAgent
+			// Проверяет, что источник находится внутри распакованной папки FiReAgent
 			rootClean := filepath.Clean(fiRoot)
 			if !strings.EqualFold(rootClean, srcAbs) && !strings.HasPrefix(strings.ToLower(srcAbs)+string(os.PathSeparator), strings.ToLower(rootClean)+string(os.PathSeparator)) {
 				return selfUpdatePending, fmt.Errorf("src вне FiReAgent/: %s", it.Src)
@@ -59,6 +59,35 @@ func applyOperations(extractDir, baseDir string, man *Manifest) (bool, error) {
 			destLog := destAbs
 			if rel, err := filepath.Rel(baseDir, destAbs); err == nil {
 				destLog = filepath.ToSlash(rel)
+			}
+
+			// Обработка папок
+			if it.IsDir {
+				srcInfo, statErr := os.Stat(srcAbs)
+				if statErr != nil {
+					return selfUpdatePending, fmt.Errorf("папка-источник не найден: %s: %w", srcAbs, statErr)
+				}
+				if !srcInfo.IsDir() {
+					return selfUpdatePending, fmt.Errorf("IsDir=true, но источник не является папкой: %s", srcAbs)
+				}
+
+				// Подсчитывает количество файлов в папке для лога
+				fileCount := countFilesInDir(srcAbs)
+
+				if it.Replace {
+					log.Printf("ЗАМЕНА ПАПКИ: %s -> %s (%d файлов)", srcLog, destLog, fileCount)
+				} else {
+					log.Printf("ОБНОВЛЕНИЕ ПАПКИ: %s -> %s (%d файлов)", srcLog, destLog, fileCount)
+				}
+
+				if err := copyDirReplace(srcAbs, destAbs, it.Replace); err != nil {
+					return selfUpdatePending, fmt.Errorf("ошибка применения обновления папки %s -> %s: %w", srcAbs, destAbs, err)
+				}
+
+				updatedCount++
+				log.Printf("УСПЕХ: %s (папка)", destLog)
+				time.Sleep(20 * time.Millisecond)
+				continue
 			}
 
 			// Получает размер файла для отображения в логе
@@ -89,7 +118,7 @@ func applyOperations(extractDir, baseDir string, man *Manifest) (bool, error) {
 			}
 
 			if size >= 0 {
-				log.Printf("ОБНОВЛЕНИЕ: %s -> %s (%d байт)", srcLog, destLog, size)
+				log.Printf("ОБНОВЛЕНИЕ: %s -> %s (%s)", srcLog, destLog, formatSize(size))
 			} else {
 				log.Printf("ОБНОВЛЕНИЕ: %s -> %s", srcLog, destLog)
 			}
@@ -173,7 +202,8 @@ func copyReplace(src, dst string) error {
 	}
 
 	// Использует несколько попыток на случай, если целевой файл временно занят другой программой
-	for range 5 {
+	var lastErr error
+	for attempt := range 5 {
 		tmp := dst + ".tmp"
 		if err := copyFile(src, tmp, info.Mode()); err != nil {
 			return err
@@ -181,11 +211,22 @@ func copyReplace(src, dst string) error {
 		_ = os.Remove(dst)
 		if err := os.Rename(tmp, dst); err == nil {
 			return nil
+		} else {
+			lastErr = err
 		}
 		_ = os.Remove(tmp)
+
+		// После второй неудачной попытки пробует определить и завершить блокирующий процесс
+		if attempt >= 1 {
+			if tryUnlockFile(dst, 3) {
+				// Файл разблокирован, сразу пробует ещё раз
+				continue
+			}
+		}
+
 		time.Sleep(200 * time.Millisecond)
 	}
-	return fmt.Errorf("не удалось заменить файл: %s", dst)
+	return fmt.Errorf("не удалось заменить файл: %s (последняя ошибка: %v)", dst, lastErr)
 }
 
 // CopyFile копирует содержимое файла
@@ -208,7 +249,7 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	return out.Close()
 }
 
-// DeletePath удаляет файл или каталог, включая рекурсивное удаление каталогов
+// DeletePath удаляет файл или папку, включая рекурсивное удаление папок
 func deletePath(p string) error {
 	fi, err := os.Stat(p)
 	if err != nil {
@@ -253,4 +294,151 @@ func scheduleSelfUpdate(newExe, oldExe string) {
 	syscall.CreateProcess(nil, cmdLinePtr, nil, nil, false, CREATE_NO_WINDOW, nil, nil, si, pi)
 	syscall.CloseHandle(pi.Process) // Освобождает ресурсы, не дожидаясь завершения
 	syscall.CloseHandle(pi.Thread)
+}
+
+// countFilesInDir подсчитывает количество файлов в папке рекурсивно
+func countFilesInDir(dir string) int {
+	count := 0
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() {
+			count++
+		}
+		return nil
+	})
+	return count
+}
+
+// copyDirReplace копирует папку из src в dst
+func copyDirReplace(src, dst string, replace bool) error {
+	// Проверяет, что источник существует и является папкой
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("папка-источник не найдена: %w", err)
+	}
+	if !srcInfo.IsDir() {
+		return fmt.Errorf("источник не является папкой: %s", src)
+	}
+
+	// Если режим замены - удаляет старую папку целиком
+	if replace {
+		if _, err := os.Stat(dst); err == nil {
+			log.Printf(" Удаление старого содержимого: %s", dst)
+			if err := removeDirectoryContents(dst); err != nil {
+				return fmt.Errorf("не удалось удалить старую папку %s: %w", dst, err)
+			}
+		}
+	}
+
+	// Создаёт целевую папку
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		return fmt.Errorf("не удалось создать папку %s: %w", dst, err)
+	}
+
+	// Рекурсивно копирует содержимое
+	return filepath.Walk(src, func(srcPath string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Вычисляет относительный путь
+		relPath, err := filepath.Rel(src, srcPath)
+		if err != nil {
+			return err
+		}
+
+		dstPath := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			// Создаёт подпапки
+			return os.MkdirAll(dstPath, info.Mode())
+		}
+
+		// Копирует файл
+		if err := copyReplace(srcPath, dstPath); err != nil {
+			return fmt.Errorf("ошибка копирования %s -> %s: %w", srcPath, dstPath, err)
+		}
+
+		return nil
+	})
+}
+
+// removeDirectoryContents удаляет папку со всем содержимым, используя надёжный метод для Windows
+func removeDirectoryContents(dir string) error {
+	// Сначала пробует стандартный метод
+	if err := os.RemoveAll(dir); err == nil {
+		return nil
+	}
+
+	// Если не получилось - удаляет содержимое вручную
+	var files []string
+	var dirs []string
+
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Игнорирует ошибки доступа
+		}
+		if path == dir {
+			return nil
+		}
+		if info.IsDir() {
+			dirs = append(dirs, path)
+		} else {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	// Удаляет все файлы с повторными попытками
+	for _, f := range files {
+		for range 3 {
+			if err := os.Remove(f); err == nil || os.IsNotExist(err) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	// Удаляет папки в обратном порядке (сначала вложенные)
+	for i := len(dirs) - 1; i >= 0; i-- {
+		for range 3 {
+			if err := os.Remove(dirs[i]); err == nil || os.IsNotExist(err) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	// Удаляет корневую папку
+	for range 5 {
+		if err := os.Remove(dir); err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Проверяет, удалилась ли папка
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return nil
+	}
+
+	return fmt.Errorf("не удалось полностью удалить папку: %s", dir)
+}
+
+// formatSize преобразует размер в удобночитаемые величины (Байт, КБ, МБ)
+func formatSize(size int64) string {
+	if size < 1024 {
+		return fmt.Sprintf("%d Байт", size)
+	}
+	fSize := float64(size) / 1024.0
+	if fSize < 1024.0 {
+		return fmt.Sprintf("%.2f КБ", fSize)
+	}
+	fSize /= 1024.0
+	return fmt.Sprintf("%.2f МБ", fSize)
 }

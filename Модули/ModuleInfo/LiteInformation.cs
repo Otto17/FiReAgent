@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2025 Otto
+﻿// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 #nullable enable
@@ -25,6 +25,21 @@ namespace ModuleInfo
 
         // Буфер для сборки HTML-контента
         private static readonly StringBuilder htmlContent = new();
+
+        // Флаг ограниченного режима (без GUI-зависимых функций)
+        private static bool _limitedMode = false;
+
+        // Путь к файлу кэша мониторов
+        private static readonly string MonitorCacheFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config", "Cache", "monitor_cache.json");
+
+        // Структура для хранения кэшированных данных монитора
+        private class MonitorCacheEntry
+        {
+            public string Name { get; set; } = "";
+            public string Type { get; set; } = "";
+            public string Resolution { get; set; } = "";
+            public string RefreshRate { get; set; } = "";
+        }
 
         // LiteInformation инициализирует базовую структуру HTML и стили
         static LiteInformation()
@@ -74,8 +89,14 @@ namespace ModuleInfo
         }
 
         // RunAllInfo запускает сбор системной информации и сохраняет финальный отчет в формате HTML
-        internal static void RunAllInfo()
+        // limitedMode: true — запуск без GUI-сеанса (пропускает мониторы и dxdiag)
+        internal static void RunAllInfo(bool limitedMode = false)
         {
+            _limitedMode = limitedMode;
+            //if (limitedMode)
+            //{
+            //    Logging.WriteToLogFile("Активный сеанс недоступен. Сбор информации в ограниченном режиме.");
+            //}
             OSInfo();
             SharedResources();
             BaseBoardInfo();
@@ -136,16 +157,37 @@ namespace ModuleInfo
             try
             {
                 WriteInfo("Монитор:", true);
-                List<string> monitors = GetMonitorsInfo();
-                if (monitors.Count == 0)
+
+                // В ограниченном режиме EnumDisplayDevices недоступен (нет GUI-сеанса)
+                if (_limitedMode)
                 {
-                    WriteInfo("#1: Неизвестный монитор, тип монитора: N/A, разрешение: N/A, частота: N/A, дата выпуска: N/A", isSubItem: true, subItemClass: "monitor");
+                    // Пытается получить базовую информацию через WMI
+                    List<string> wmiMonitors = GetMonitorsInfoFromWmi();
+                    if (wmiMonitors.Count == 0)
+                    {
+                        WriteInfo("Информация недоступна (нет активного сеанса пользователя)", isSubItem: true, subItemClass: "monitor");
+                    }
+                    else
+                    {
+                        for (int i = 0; i < wmiMonitors.Count; i++)
+                        {
+                            WriteInfo($"#{i + 1}: {wmiMonitors[i]}", isSubItem: true, subItemClass: "monitor");
+                        }
+                    }
                 }
                 else
                 {
-                    for (int i = 0; i < monitors.Count; i++)
+                    List<string> monitors = GetMonitorsInfo();
+                    if (monitors.Count == 0)
                     {
-                        WriteInfo($"#{i + 1}: {monitors[i]}", isSubItem: true, subItemClass: "monitor");
+                        WriteInfo("#1: Неизвестный монитор, тип монитора: N/A, разрешение: N/A, частота: N/A, дата выпуска: N/A", isSubItem: true, subItemClass: "monitor");
+                    }
+                    else
+                    {
+                        for (int i = 0; i < monitors.Count; i++)
+                        {
+                            WriteInfo($"#{i + 1}: {monitors[i]}", isSubItem: true, subItemClass: "monitor");
+                        }
                     }
                 }
                 WriteInfo("", isHeader: false);
@@ -192,6 +234,7 @@ namespace ModuleInfo
             }
 
             List<string> monitors = [];
+            List<MonitorCacheEntry> cacheEntries = []; // Для сохранения в кэш
             int monitorIndex = 0;
             ProcessLauncher.DISPLAY_DEVICE dd = new() { cb = Marshal.SizeOf(typeof(ProcessLauncher.DISPLAY_DEVICE)) };
 
@@ -284,10 +327,119 @@ namespace ModuleInfo
 
                     string monitorInfo = $"{monitorName}, тип монитора: {monitorType}, разрешение: {resolution}, частота: {refreshRate}, дата выпуска: {releaseDate}";
                     monitors.Add(monitorInfo);
+
+                    // Добавляет запись в кэш (только если есть реальные данные)
+                    if (resolution != "N/A" && refreshRate != "N/A")
+                    {
+                        cacheEntries.Add(new MonitorCacheEntry
+                        {
+                            Name = monitorName,
+                            Type = monitorType ?? "N/A",
+                            Resolution = resolution,
+                            RefreshRate = refreshRate
+                        });
+                    }
+
                     monitorIndex++;
                 }
                 dd.cb = Marshal.SizeOf(typeof(ProcessLauncher.DISPLAY_DEVICE));
             }
+
+            // Сохраняет данные в кэш для использования в ограниченном режиме
+            SaveMonitorCache(cacheEntries);
+
+            return monitors;
+        }
+
+        // GetMonitorsInfoFromWmi получает базовую информацию о мониторах через WMI (без EnumDisplayDevices)
+        private static List<string> GetMonitorsInfoFromWmi()
+        {
+            List<string> monitors = [];
+
+            // Загружает кэш с предыдущих запусков
+            var cache = LoadMonitorCache();
+
+            try
+            {
+                List<ManagementObject> monitorIDs = [];
+                try
+                {
+                    var idSearcher = new ManagementObjectSearcher(@"root\wmi", "SELECT * FROM WmiMonitorID");
+                    monitorIDs = [.. idSearcher.Get().Cast<ManagementObject>()];
+                }
+                catch { }
+
+                List<ManagementObject> basicParams = [];
+                try
+                {
+                    var basicSearcher = new ManagementObjectSearcher(@"root\wmi", "SELECT * FROM WmiMonitorBasicDisplayParams");
+                    basicParams = [.. basicSearcher.Get().Cast<ManagementObject>()];
+                }
+                catch { }
+
+                for (int i = 0; i < monitorIDs.Count; i++)
+                {
+                    string manufacturer = DecodeEdid(monitorIDs[i]["ManufacturerName"] as ushort[]);
+                    string product = DecodeEdid(monitorIDs[i]["UserFriendlyName"] as ushort[]);
+                    string monitorName = (manufacturer != "N/A" && product != "N/A")
+                        ? $"{manufacturer} {product}"
+                        : "Неизвестный монитор";
+
+                    string monitorType = "N/A";
+                    if (i < basicParams.Count)
+                    {
+                        try
+                        {
+                            int horizontalSize = Convert.ToInt32(basicParams[i]["MaxHorizontalImageSize"]);
+                            int verticalSize = Convert.ToInt32(basicParams[i]["MaxVerticalImageSize"]);
+                            if (horizontalSize > 0 && verticalSize > 0)
+                            {
+                                double diagonalInches = Math.Sqrt(horizontalSize * horizontalSize + verticalSize * verticalSize) / 2.54;
+                                int diagRounded = (int)Math.Round(diagonalInches);
+                                monitorType = $"{diagRounded}\" LCD";
+                            }
+                        }
+                        catch { }
+                    }
+
+                    string releaseDate = "N/A";
+                    try
+                    {
+                        var weekObj = monitorIDs[i]["WeekOfManufacture"];
+                        var yearObj = monitorIDs[i]["YearOfManufacture"];
+                        if (weekObj != null && yearObj != null)
+                        {
+                            int week = Convert.ToInt32(weekObj);
+                            int year = Convert.ToInt32(yearObj);
+                            if (week > 0 && year > 0)
+                            {
+                                releaseDate = $"Неделя {week} / Год {year}";
+                            }
+                        }
+                    }
+                    catch { }
+
+                    // Пытается найти монитор в кэше по имени и типу
+                    string resolution = "N/A*";
+                    string refreshRate = "N/A*";
+
+                    var cached = FindCachedMonitor(cache, monitorName, monitorType);
+                    if (cached != null)
+                    {
+                        // Найден в кэше — используем сохранённые значения
+                        resolution = cached.Resolution + "*";
+                        refreshRate = cached.RefreshRate + "*";
+                    }
+
+                    string monitorInfo = $"{monitorName}, тип монитора: {monitorType}, разрешение: {resolution}, частота: {refreshRate}, дата выпуска: {releaseDate}";
+                    monitors.Add(monitorInfo);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logging.WriteToLogFile($"Ошибка получения информации о мониторах через WMI: {ex.Message}");
+            }
+
             return monitors;
         }
 
@@ -337,6 +489,173 @@ namespace ModuleInfo
                 result.Append((char)c);
             }
             return string.IsNullOrWhiteSpace(result.ToString()) ? "N/A" : result.ToString();
+        }
+
+
+        // SaveMonitorCache сохраняет данные о мониторах в файл кэша (только если данные изменились)
+        private static void SaveMonitorCache(List<MonitorCacheEntry> monitors)
+        {
+            try
+            {
+                // Загружает существующий кэш для сравнения
+                var existingCache = LoadMonitorCache();
+
+                // Проверяет, изменились ли данные
+                if (!IsCacheChanged(existingCache, monitors))
+                {
+                    return; // Данные не изменились, перезапись не нужна
+                }
+
+                // Создаёт папку, если не существует
+                string? dir = Path.GetDirectoryName(MonitorCacheFile);
+                if (dir != null && !Directory.Exists(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+
+                // Формирует JSON вручную (без внешних библиотек)
+                var sb = new StringBuilder();
+                sb.AppendLine("[");
+                for (int i = 0; i < monitors.Count; i++)
+                {
+                    var m = monitors[i];
+                    sb.AppendLine("  {");
+                    sb.AppendLine($"    \"Name\": \"{EscapeJson(m.Name)}\",");
+                    sb.AppendLine($"    \"Type\": \"{EscapeJson(m.Type)}\",");
+                    sb.AppendLine($"    \"Resolution\": \"{EscapeJson(m.Resolution)}\",");
+                    sb.AppendLine($"    \"RefreshRate\": \"{EscapeJson(m.RefreshRate)}\"");
+                    sb.Append("  }");
+                    if (i < monitors.Count - 1) sb.Append(",");
+                    sb.AppendLine();
+                }
+                sb.AppendLine("]");
+
+                File.WriteAllText(MonitorCacheFile, sb.ToString(), Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                Logging.WriteToLogFile($"Ошибка сохранения кэша мониторов: {ex.Message}");
+            }
+        }
+
+        // IsCacheChanged проверяет, отличаются ли новые данные от существующего кэша
+        private static bool IsCacheChanged(List<MonitorCacheEntry> existing, List<MonitorCacheEntry> current)
+        {
+            // Разное количество мониторов — данные изменились
+            if (existing.Count != current.Count)
+                return true;
+
+            // Сравнивает каждый монитор
+            for (int i = 0; i < current.Count; i++)
+            {
+                var curr = current[i];
+
+                // Ищет соответствующий монитор в существующем кэше по имени и типу
+                bool found = false;
+                foreach (var ex in existing)
+                {
+                    if (ex.Name == curr.Name &&
+                        ex.Type == curr.Type &&
+                        ex.Resolution == curr.Resolution &&
+                        ex.RefreshRate == curr.RefreshRate)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found)
+                    return true; // Монитор не найден или данные отличаются
+            }
+
+            return false; // Все данные совпадают
+        }
+
+        // LoadMonitorCache загружает данные о мониторах из файла кэша
+        private static List<MonitorCacheEntry> LoadMonitorCache()
+        {
+            var result = new List<MonitorCacheEntry>();
+
+            try
+            {
+                if (!File.Exists(MonitorCacheFile))
+                    return result;
+
+                string json = File.ReadAllText(MonitorCacheFile, Encoding.UTF8);
+
+                // Простой парсер JSON для массива объектов
+                int pos = 0;
+                while ((pos = json.IndexOf("{", pos)) != -1)
+                {
+                    int end = json.IndexOf("}", pos);
+                    if (end == -1) break;
+
+                    string obj = json.Substring(pos, end - pos + 1);
+                    var entry = new MonitorCacheEntry
+                    {
+                        Name = ExtractJsonValue(obj, "Name"),
+                        Type = ExtractJsonValue(obj, "Type"),
+                        Resolution = ExtractJsonValue(obj, "Resolution"),
+                        RefreshRate = ExtractJsonValue(obj, "RefreshRate")
+                    };
+                    result.Add(entry);
+                    pos = end + 1;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logging.WriteToLogFile($"Ошибка загрузки кэша мониторов: {ex.Message}");
+            }
+
+            return result;
+        }
+
+        // ExtractJsonValue извлекает значение поля из JSON-строки
+        private static string ExtractJsonValue(string json, string key)
+        {
+            string pattern = $"\"{key}\": \"";
+            int start = json.IndexOf(pattern);
+            if (start == -1) return "";
+
+            start += pattern.Length;
+            int end = json.IndexOf("\"", start);
+            if (end == -1) return "";
+
+            return UnescapeJson(json.Substring(start, end - start));
+        }
+
+        // EscapeJson экранирует специальные символы для JSON
+        private static string EscapeJson(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r");
+        }
+
+        // UnescapeJson восстанавливает экранированные символы из JSON
+        private static string UnescapeJson(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            return s.Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\\"", "\"").Replace("\\\\", "\\");
+        }
+
+        // FindCachedMonitor ищет монитор в кэше по имени и типу
+        private static MonitorCacheEntry? FindCachedMonitor(List<MonitorCacheEntry> cache, string name, string type)
+        {
+            // Сначала ищет точное совпадение по имени и типу
+            foreach (var entry in cache)
+            {
+                if (entry.Name == name && entry.Type == type)
+                    return entry;
+            }
+
+            // Если тип не совпал, ищет только по имени (монитор мог быть с другим разрешением)
+            foreach (var entry in cache)
+            {
+                if (entry.Name == name)
+                    return entry;
+            }
+
+            return null;
         }
 
         // GetWorkgroup получает название рабочей группы компьютера
@@ -440,6 +759,12 @@ namespace ModuleInfo
         // GetDirectXVersion запускает dxdiag для получения актуальной версии DirectX
         private static string GetDirectXVersion()
         {
+            // В ограниченном режиме dxdiag недоступен (требует GUI-сеанс)
+            if (_limitedMode)
+            {
+                return GetDirectXVersionFromRegistry();
+            }
+
             try
             {
                 string tempFile = Path.Combine(Path.GetTempPath(), "dxdiag_output.txt");
@@ -476,6 +801,37 @@ namespace ModuleInfo
                 Logging.WriteToLogFile("Ошибка: " + ex.Message);
             }
             return "N/A";
+        }
+
+
+        // GetDirectXVersionFromRegistry определяет версию DirectX по версии Windows из реестра
+        private static string GetDirectXVersionFromRegistry()
+        {
+            try
+            {
+                // На Windows 10+ DirectX 12 встроен, определяем по номеру сборки
+                var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+                if (key != null)
+                {
+                    string build = key.GetValue("CurrentBuildNumber", "0").ToString();
+                    if (int.TryParse(build, out int buildNumber))
+                    {
+                        // Windows 11 (сборка 22000+) - DirectX 12 Ultimate
+                        if (buildNumber >= 22000) return "12 (определено по версии ОС)";
+                        // Windows 10 (сборка 10240+) - DirectX 12
+                        if (buildNumber >= 10240) return "12 (определено по версии ОС)";
+                        // Windows 8.1 (сборка 9600) - DirectX 11.2
+                        if (buildNumber >= 9600) return "11.2 (определено по версии ОС)";
+                        // Windows 8 (сборка 9200) - DirectX 11.1
+                        if (buildNumber >= 9200) return "11.1 (определено по версии ОС)";
+                        // Windows 7 - DirectX 11
+                        if (buildNumber >= 7600) return "11 (определено по версии ОС)";
+                    }
+                }
+            }
+            catch { }
+
+            return "N/A (нет активного сеанса)";
         }
 
         // GetDotNetVersion определяет версию .NET Framework 4x по значению Release в реестре

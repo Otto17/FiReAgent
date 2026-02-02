@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -39,12 +39,12 @@ type MQTTService struct {
 	connectedAt time.Time     // Хранит время запуска сервиса для определения приоритета при конфликте ID клиентов
 }
 
-// StartMQTTClient создаёт MQTT-соединение и возвращает объект MQTTService
-func StartMQTTClient() *MQTTService {
+// StartMQTTClient создаёт MQTT-соединение и возвращает объект MQTTService или ошибку
+func StartMQTTClient() (*MQTTService, error) {
 	ctx := context.Background()
 	tlsConfig, urlBroker, portMQTT, loginMQTT, passwordMQTT, mqttID, err := createTLSConfig()
 	if err != nil {
-		log.Fatalf("Ошибка при создании TLS-конфигурации: %v", err)
+		return nil, fmt.Errorf("ошибка при создании TLS-конфигурации: %v", err)
 	}
 
 	// Инициализирует объект сервиса, трекер и сохраняет mqttID
@@ -57,7 +57,7 @@ func StartMQTTClient() *MQTTService {
 	// Использует TLS-соединение при парсинге URL брокера
 	brokerURL, err := url.Parse(fmt.Sprintf("tls://%s:%s", urlBroker, portMQTT))
 	if err != nil {
-		log.Fatalf("Ошибка парсинга URL: %v", err)
+		return nil, fmt.Errorf("ошибка парсинга URL: %v", err)
 	}
 
 	cliCfg := autopaho.ClientConfig{
@@ -212,7 +212,7 @@ func StartMQTTClient() *MQTTService {
 	}
 	svc.client = connMgr
 
-	return svc
+	return svc, nil
 }
 
 // deleteMqttIDConfig удаляет файл "MqttID.conf" для сброса текущего ID клиента
@@ -274,6 +274,28 @@ func createTLSConfig() (*tls.Config, string, string, string, string, string, err
 		return nil, "", "", "", "", "", err
 	}
 	defer conn.Close()
+
+	// Читает статус от ModuleCrypto (первое сообщение)
+	status, err := ReadPipeData(conn)
+	if err != nil {
+		return nil, "", "", "", "", "", fmt.Errorf("ошибка чтения статуса от ModuleCrypto: %v", err)
+	}
+
+	// Проверяет статус перед чтением данных
+	switch string(status) {
+	case "OK":
+		// Продолжает чтение данных
+	case "CERT_NOT_FOUND":
+		return nil, "", "", "", "", "", fmt.Errorf("сертификат 'CryptoAgent' не найден. Установите CryptoAgent.pfx (Локальный компьютер\\Личное) и перезапустите FiReAgent")
+	case "CERTS_MISSING":
+		return nil, "", "", "", "", "", fmt.Errorf("зашифрованные файлы сертификатов отсутствуют. Поместите PEM-файлы в папку 'cert' и перезапустите FiReAgent")
+	case "DECRYPT_ERROR":
+		return nil, "", "", "", "", "", fmt.Errorf("ошибка расшифровки данных. Проверьте целостность файлов в папках 'cert' и 'config'")
+	case "CONFIG_ERROR":
+		return nil, "", "", "", "", "", fmt.Errorf("ошибка конфигурации. Файлы повреждены и были сброшены. Заполните auth.txt и перезапустите FiReAgent")
+	default:
+		return nil, "", "", "", "", "", fmt.Errorf("ошибка от ModuleCrypto: %s", status)
+	}
 
 	// Читает данные из канала в бинарном формате
 	// Порядок данных в режиме "full": [ServerURL, PortMQTT, LoginMQTT, PasswordMQTT, mqttID, CaCert, ClientCert, ClientKey]

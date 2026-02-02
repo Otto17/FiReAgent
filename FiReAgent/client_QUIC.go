@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -186,6 +186,28 @@ func getQUICFromCrypto() (string, string, []byte, []byte, []byte, error) {
 		return "", "", nil, nil, nil, err
 	}
 	defer conn.Close()
+
+	// Читает статус от ModuleCrypto (первое сообщение)
+	status, err := ReadPipeData(conn)
+	if err != nil {
+		return "", "", nil, nil, nil, fmt.Errorf("ошибка чтения статуса от ModuleCrypto: %v", err)
+	}
+
+	// Проверяет статус перед чтением данных
+	switch string(status) {
+	case "OK":
+		// Продолжает чтение данных
+	case "CERT_NOT_FOUND":
+		return "", "", nil, nil, nil, fmt.Errorf("сертификат 'CryptoAgent' не найден")
+	case "CERTS_MISSING":
+		return "", "", nil, nil, nil, fmt.Errorf("зашифрованные файлы сертификатов отсутствуют")
+	case "DECRYPT_ERROR":
+		return "", "", nil, nil, nil, fmt.Errorf("ошибка расшифровки данных")
+	case "CONFIG_ERROR":
+		return "", "", nil, nil, nil, fmt.Errorf("ошибка конфигурации")
+	default:
+		return "", "", nil, nil, nil, fmt.Errorf("ошибка от ModuleCrypto: %s", status)
+	}
 
 	// Читает последовательные бинарные блоки данных из Named Pipe
 	urlQUICBytes, err := ReadPipeData(conn)

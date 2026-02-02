@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -11,18 +11,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sync"
-	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/Microsoft/go-winio"
-	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
-
-// missingCertLogOnce гарантирует одноразовый запуск ModuleCrypto
-var missingCertLogOnce sync.Once
 
 // PipeMessageType определяет тип сообщения для канала
 type PipeMessageType int
@@ -62,6 +55,7 @@ func StartModuleAndConnect(moduleName, pipeGUID, baseTimeHex string, mode ...str
 	argsNP = append(argsNP, "--pipe", "--pipename="+pipeGUID)
 
 	cmd := exec.Command(modulePath, argsNP...)
+	cmd.Dir = filepath.Dir(modulePath) // Установка рабочей директории для корректной записи логов
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -77,7 +71,7 @@ func StartModuleAndConnect(moduleName, pipeGUID, baseTimeHex string, mode ...str
 	// log.Printf("Ожидание подключения к каналу: %s", pipeName)
 
 	var conn net.Conn
-	maxWait := 3 * time.Second
+	maxWait := 35 * time.Second
 	startTime := time.Now()
 	for {
 		conn, err = winio.DialPipe(pipeName, nil)
@@ -133,80 +127,4 @@ func GetBaseTimeHex() (string, error) {
 
 	// Преобразует в шестнадцатеричный формат (8 символов, нижний регистр)
 	return fmt.Sprintf("%08x", baseTime), nil
-}
-
-// isCryptoAgentCertInstalled проверяет, установлен ли сертификат "CryptoAgent" в хранилище "Локальный компьютер\\Личное"
-func isCryptoAgentCertInstalled() (bool, error) {
-	// Использует библиотеку Crypt32 для работы с хранилищем сертификатов
-	crypt32 := windows.NewLazySystemDLL("crypt32.dll")
-	procCertOpenStore := crypt32.NewProc("CertOpenStore")                           // Получает адрес функции открытия хранилища
-	procCertFindCertificateInStore := crypt32.NewProc("CertFindCertificateInStore") // Получает адрес функции поиска сертификата
-	procCertFreeCertificateContext := crypt32.NewProc("CertFreeCertificateContext") // Получает адрес функции освобождения контекста
-	procCertCloseStore := crypt32.NewProc("CertCloseStore")                         // Получает адрес функции закрытия хранилища
-
-	// Флаги Windows API необходимые для работы с функциями Crypt32
-	const (
-		CERT_STORE_PROV_SYSTEM_W        = 0x0000000A // Провайдер системного хранилища
-		CERT_SYSTEM_STORE_LOCAL_MACHINE = 0x00020000 // Хранилище Локального компьютера
-		CERT_STORE_READONLY_FLAG        = 0x00008000 // Режим только для чтения
-
-		X509_ASN_ENCODING   = 0x00000001 // Кодировка X509
-		PKCS_7_ASN_ENCODING = 0x00010000 // Кодировка PKCS7
-
-		CERT_FIND_SUBJECT_STR_W = 0x00080007 // Метод поиска по строке Subject
-	)
-
-	// Открывает хранилище LocalMachine\My для поиска сертификата
-	storeName, _ := windows.UTF16PtrFromString("My")
-	hStore, _, err := procCertOpenStore.Call(
-		uintptr(CERT_STORE_PROV_SYSTEM_W),
-		0,
-		0,
-		uintptr(CERT_SYSTEM_STORE_LOCAL_MACHINE|CERT_STORE_READONLY_FLAG),
-		uintptr(unsafe.Pointer(storeName)),
-	)
-
-	if hStore == 0 {
-		return false, fmt.Errorf("CertOpenStore(LocalMachine\\My) failed: %v", err)
-	}
-	defer procCertCloseStore.Call(hStore, 0)
-
-	// Ищет сертификат по строке Subject "CryptoAgent"
-	subj, _ := windows.UTF16PtrFromString("CryptoAgent")
-	ctx, _, _ := procCertFindCertificateInStore.Call(
-		hStore,
-		uintptr(X509_ASN_ENCODING|PKCS_7_ASN_ENCODING),
-		0,
-		uintptr(CERT_FIND_SUBJECT_STR_W),
-		uintptr(unsafe.Pointer(subj)),
-		0,
-	)
-	if ctx != 0 {
-		procCertFreeCertificateContext.Call(ctx)
-		return true, nil
-	}
-	return false, nil
-}
-
-// logMissingCertOnce выполняет однократное логирование отсутствия необходимого сертификата
-func logMissingCertOnce() {
-	missingCertLogOnce.Do(func() { // Использует "Do" для гарантии однократного выполнения логирования
-		baseTimeHex, err := GetBaseTimeHex()
-		if err != nil {
-			return
-		}
-
-		exePath, err := os.Executable()
-		if err != nil {
-			return
-		}
-		modulePath := filepath.Join(filepath.Dir(exePath), "ModuleCrypto.exe")
-
-		// Запускает модуль без pipe-режима чтобы обеспечить немедленное логирование ошибки сертификата
-		cmd := exec.Command(modulePath, baseTimeHex, "full")
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-
-		// Ожидание завершения гарантирует запись лога перед возможной остановкой службы
-		_ = cmd.Run() // Выполняет запуск поскольку ошибки здесь не являются критичными
-	})
 }

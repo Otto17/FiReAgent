@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -23,11 +23,11 @@ import (
 )
 
 const (
-	CurrentVersion = "30.11.25" // Текущая версия ClientUpdater в формате "дд.мм.гг"
+	CurrentVersion = "02.02.25" // Текущая версия ClientUpdater в формате "дд.мм.гг"
 
 	exeName         = "FiReAgent.exe"                                                 // Главный исполняемый файл агента, который будет останавливаться (служба) пред обновлением и запускаться после
 	zipAssetPattern = `^FiReAgent-([0-9]{2}\.[0-9]{2}\.[0-9]{2})-windows-amd64\.zip$` // Шаблон имени ZIP-ассета релиза "FiReAgent-дд.мм.гг-windows-amd64.zip"
-	tmpDirName      = "tmp"                                                           // Временная папка для загрузки, распаковки обновления срепозитория
+	tmpDirName      = "tmp"                                                           // Временная папка для загрузки, распаковки обновления с репозитория
 
 	// Тайм-ауты (страховка от зависаний)
 	httpTimeout  = 5 * time.Minute  // Чтобы скачивание не висело бесконечно при проблемах с сетью/репозиторием
@@ -49,9 +49,9 @@ func main() {
 		return
 	}
 
-	// Запрет запуска вне каталога установки
+	// Запрет запуска вне папки установки
 	if !pathEqualFold(exeDir(), baseDir) {
-		fmt.Printf("Запуск возможен только из каталога: \"%s\"\nТекущий каталог: %s\n",
+		fmt.Printf("Запуск возможен только из папки: \"%s\"\nТекущая папка: %s\n",
 			baseDir, exeDir())
 		return
 	}
@@ -71,7 +71,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Предупреждение: не удалось отвязаться от родительского процесса: %v\n", err)
 	}
 
-	// Логирование (инициализация после проверки каталога и прав)
+	// Логирование (инициализация после проверки папки и прав)
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("[ClientUpdater] ")
 
@@ -178,8 +178,16 @@ func run(conf UpdaterConf) error {
 		log.Printf("FiReAgent остановлен и служба удалена.")
 	}
 
-	// Запуск FiReAgent в конце работы (или при ошибке)
+	// Запуск FiReAgent в конце работы (или при ошибке) и обработка самообновления
 	defer func() {
+		// Проверяет наличие файла самообновления и запускает планировщик при любом исходе
+		myExe, _ := os.Executable()
+		newExe := strings.TrimSuffix(myExe, ".exe") + "_new.exe"
+		if _, statErr := os.Stat(newExe); statErr == nil {
+			log.Println("Запуск планировщика самообновления (замена ClientUpdater.exe после выхода)...")
+			scheduleSelfUpdate(newExe, myExe)
+		}
+
 		log.Println("Инициализация запуска FiReAgent (-is)...")
 		// Попытка запустить службу
 		if err := runCmdTimeout(exePath, cmdTimeout, "-is"); err != nil {
@@ -196,8 +204,6 @@ func run(conf UpdaterConf) error {
 	}()
 
 	// ЭТАП 2: Поэтапная установка версий
-	selfUpdatePending := false
-
 	for i, meta := range updates {
 		log.Printf(">>> Установка обновления %d из %d: версия %s <<<", i+1, len(updates), meta.RemoteVersion)
 
@@ -237,13 +243,8 @@ func run(conf UpdaterConf) error {
 		}
 
 		// Применение обновления
-		// selfUpdatePending обновляется на каждой итерации, если хоть одна версия требует самообновления - флаг будет true (фактически, последняя версия перезапишет _new.exe)
-		isSelf, err := applyOperations(updateRoot, baseDir, man)
-		if err != nil {
+		if _, err := applyOperations(updateRoot, baseDir, man); err != nil {
 			return fmt.Errorf("сбой установки версии %s: %w", meta.RemoteVersion, err)
-		}
-		if isSelf {
-			selfUpdatePending = true
 		}
 
 		// Обновление истории (после каждого успешного шага)
@@ -260,15 +261,6 @@ func run(conf UpdaterConf) error {
 
 		log.Printf("Версия %s успешно установлена.", meta.RemoteVersion)
 		LogBlankLines(1)
-	}
-
-	// ЭТАП 3: Завершение
-	// Если было запланировано самообновление
-	if selfUpdatePending {
-		myExe, _ := os.Executable()
-		newExe := strings.TrimSuffix(myExe, ".exe") + "_new.exe"
-		log.Println("Запуск планировщика самообновления (замена ClientUpdater.exe после выхода)...")
-		scheduleSelfUpdate(newExe, myExe)
 	}
 
 	fmt.Println("Все обновления выполнены успешно.")
@@ -369,7 +361,7 @@ func sanitizeZipEntry(f *zip.File) (rel string, isDir bool, ok bool) {
 	clean := path.Clean(strings.TrimPrefix(n, "./"))
 	clean = strings.Trim(clean, "/")
 
-	// Запрещает обход каталогов (..) и небезопасные символы
+	// Запрещает обход папок (..) и небезопасные символы
 	if clean == "" || clean == "." {
 		return "", false, false
 	}
@@ -413,15 +405,22 @@ func normalizeZipEntryName(f *zip.File) string {
 		return n
 	}
 
-	// Принимает имя как есть, если оно похоже на валидный UTF-8
-	if utf8.ValidString(n) {
+	// Если строка валидный UTF-8 и содержит кириллические символы - используется как есть
+	if utf8.ValidString(n) && hasCyrillicRunes(n) {
 		return n
 	}
 
-	// Иначе пробует декодировать "сырые" байты имени
-	raw := []byte(n)
+	// Если строка валидный UTF-8 и содержит только ASCII - используется как есть
+	if utf8.ValidString(n) && isASCII(n) {
+		return n
+	}
 
-	candidates := make([]string, 0, 3)
+	// Иначе пробует декодировать из разных кодировок
+	raw := []byte(n)
+	candidates := make([]string, 0, 4)
+
+	// Добавляет исходную строку как кандидата
+	candidates = append(candidates, n)
 
 	// Пытается декодировать байты, используя основные кодировки для кириллицы
 	if b, err := charmap.Windows1251.NewDecoder().Bytes(raw); err == nil {
@@ -447,11 +446,38 @@ func normalizeZipEntryName(f *zip.File) string {
 	return best
 }
 
-// scoreCyr подсчитывает количество символов, похожих на кириллицу или служебные символы пути
+// hasCyrillicRunes проверяет, содержит ли строка кириллические символы
+func hasCyrillicRunes(s string) bool {
+	for _, r := range s {
+		if r >= 0x0400 && r <= 0x04FF {
+			return true
+		}
+	}
+	return false
+}
+
+// isASCII проверяет, содержит ли строка только ASCII-символы
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > 127 {
+			return false
+		}
+	}
+	return true
+}
+
+// scoreCyr подсчитывает количество русских букв и служебных символов пути
 func scoreCyr(s string) int {
 	cnt := 0
 	for _, r := range s {
-		if (r >= 0x0400 && r <= 0x04FF) || r == ' ' || r == '.' || r == '_' || r == '-' || (r >= '0' && r <= '9') {
+		// Основные Русские буквы А-Я (0x0410-0x042F) и а-я (0x0430-0x044F)
+		if r >= 0x0410 && r <= 0x044F {
+			cnt += 2 // Больший вес для основных Русских букв
+		} else if r == 0x0401 || r == 0x0451 {
+			cnt += 2 // Ё и ё тоже основные Русские буквы
+		} else if r >= 0x0400 && r <= 0x04FF {
+			cnt++ // Меньший вес для остальной кириллицы
+		} else if r == ' ' || r == '.' || r == '_' || r == '-' || (r >= '0' && r <= '9') {
 			cnt++
 		}
 	}

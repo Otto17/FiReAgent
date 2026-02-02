@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	CurrentVersion = "26.11.25" // Текущая версия Uninstall в формате "дд.мм.гг"
+	CurrentVersion = "02.02.26" // Текущая версия Uninstall в формате "дд.мм.гг"
 
 	// Флаги MessageBox
 	MB_YESNO        = 0x00000004 // Кнопки "Да" и "Нет"

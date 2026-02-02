@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -274,15 +274,12 @@ func copyFile(src, dst string, perm os.FileMode) error {
 	return err
 }
 
-// TryInstallPFXVariants пытается импортировать PFX, используя пароль "FiReAgent", а затем пустой пароль
+// tryInstallPFXVariants пытается импортировать PFX, используя пароль "FiReAgent"
 func tryInstallPFXVariants(pfxPath string) error {
 	if err := installPFXToLocalMachineNoExport(pfxPath, "FiReAgent"); err == nil {
 		return nil
 	}
-	if err := installPFXToLocalMachineNoExport(pfxPath, ""); err == nil {
-		return nil
-	}
-	return errors.New("не удалось установить PFX (оба варианта пароля)")
+	return errors.New("не удалось установить PFX (неверный пароль)")
 }
 
 // InstallPFXToLocalMachineNoExport устанавливает PFX в хранилище LocalMachine\My, запрещая экспорт приватного ключа

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Otto
+// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 package main
@@ -128,4 +128,23 @@ func isWindows10OrGreater() bool {
 	}
 	// Версии ниже 10 не поддерживают ANSI VT без дополнительных библиотек
 	return info.DwMajorVersion >= 10
+}
+
+// isWindows81OrGreater проверяет, является ли текущая ОС Windows 8.1 или новее
+func isWindows81OrGreater() bool {
+	var info osVersionInfoExW
+	info.DwOSVersionInfoSize = uint32(unsafe.Sizeof(info))
+	r1, _, _ := procRtlGetVersion.Call(uintptr(unsafe.Pointer(&info)))
+	if r1 != 0 {
+		// Блокирует установку, если не удалось получить версию ОС
+		return false
+	}
+	// Windows 8.1 = 6.3, Windows 10+ = 10.x
+	if info.DwMajorVersion > 6 {
+		return true
+	}
+	if info.DwMajorVersion == 6 && info.DwMinorVersion >= 3 {
+		return true
+	}
+	return false
 }

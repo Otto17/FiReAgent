@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2025 Otto
+﻿// Copyright (c) 2025-2026 Otto
 // Лицензия: MIT (см. LICENSE)
 
 using System;
@@ -59,7 +59,8 @@ namespace ModuleInfo
                         if (!ProcessLauncher.LaunchProcessInActiveSession(ChildArgument,
                             Process.GetCurrentProcess().MainModule.FileName))
                         {
-                            Logging.WriteToLogFile("Не удалось запустить процесс в активном сеансе.");
+                            // Активный сеанс недоступен, собираем информацию в ограниченном режиме
+                            LiteInformation.RunAllInfo(limitedMode: true);
                         }
                     }
                 }

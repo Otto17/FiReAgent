@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	CurrentVersion = "02.02.26" // Текущая версия Uninstall в формате "дд.мм.гг"
+	CurrentVersion = "10.02.26" // Текущая версия Uninstall в формате "дд.мм.гг"
 
 	// Флаги MessageBox
 	MB_YESNO        = 0x00000004 // Кнопки "Да" и "Нет"
@@ -82,8 +82,24 @@ func main() {
 		}
 	}
 
+	// Останавливает и удаляет службу AgentMon, если она существует
+	exists, running, _ := serviceExistsAndRunning("AgentMon")
+	if exists {
+		if running {
+			fmt.Println("Служба \"AgentMon\" (запущена) — остановка и удаление службы...")
+		} else {
+			fmt.Println("Служба \"AgentMon\" установлена (не запущена) — удаление службы...")
+		}
+		_ = stopAndDeleteAgentMonViaExe(targetDir)
+
+		fmt.Println("Ожидание остановки службы \"AgentMon\"...")
+		waitAgentMonExit(filepath.Join(targetDir, "AgentMon.exe"))
+	} else {
+		fmt.Println("Служба \"AgentMon\" не установлена.")
+	}
+
 	// Останавливает и удаляет службу FiReAgent, если она существует
-	exists, running, _ := serviceExistsAndRunning("FiReAgent")
+	exists, running, _ = serviceExistsAndRunning("FiReAgent")
 	if exists {
 		if running {
 			fmt.Println("Служба \"FiReAgent\" (запущена) — остановка и удаление службы...")

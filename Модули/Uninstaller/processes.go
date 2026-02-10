@@ -14,6 +14,8 @@ import (
 
 // targetFiles — список исполняемых файлов, процессы которых требуется завершить, если они запущены
 var targetFiles = []string{
+	"ClientUpdater.exe",
+	"AgentMon.exe",
 	"FiReAgent.exe",
 	"ModuleCrypto.exe",
 	"ModuleInfo.exe",

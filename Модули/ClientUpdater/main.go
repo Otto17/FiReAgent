@@ -19,11 +19,13 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/mgr"
 	"golang.org/x/text/encoding/charmap"
 )
 
 const (
-	CurrentVersion = "02.02.25" // Текущая версия ClientUpdater в формате "дд.мм.гг"
+	CurrentVersion = "10.02.25" // Текущая версия ClientUpdater в формате "дд.мм.гг"
 
 	exeName         = "FiReAgent.exe"                                                 // Главный исполняемый файл агента, который будет останавливаться (служба) пред обновлением и запускаться после
 	zipAssetPattern = `^FiReAgent-([0-9]{2}\.[0-9]{2}\.[0-9]{2})-windows-amd64\.zip$` // Шаблон имени ZIP-ассета релиза "FiReAgent-дд.мм.гг-windows-amd64.zip"
@@ -35,6 +37,9 @@ const (
 	checkTimeout = 20 * time.Second // Ограничение времени запроса к API релизов (GitHub/GitFlic), предохранитель от зависаний
 
 	baseDir = `C:\Program Files\FiReAgent` // Базовая директория, в которой производится обновление, выход за её пределы запрещён в целях безопасности
+
+	agentMonExeName     = "AgentMon.exe" // Исполняемый файл службы мониторинга AgentMon
+	agentMonServiceName = "AgentMon"     // Имя службы мониторинга
 
 	// Флаги CreateProcess
 	createBreakawayFromJob uint32 = 0x01000000 // Запускает процесс отдельно от родительского (не завершается при остановке службы)
@@ -129,6 +134,37 @@ func run(conf UpdaterConf) error {
 	// Временная папка для работы
 	tmpDir := filepath.Join(exeDir(), tmpDirName)
 
+	// Определяет путь к FiReAgent (нужен для defer ниже)
+	exePath := filepath.Join(baseDir, exeName)
+
+	// Запуск FiReAgent ВСЕГДА перед завершением (независимо от наличия обновлений и ошибок)
+	defer func() {
+		// Проверяет наличие файла самообновления и запускает планировщик при любом исходе
+		myExe, _ := os.Executable()
+		newExe := strings.TrimSuffix(myExe, ".exe") + "_new.exe"
+		if _, statErr := os.Stat(newExe); statErr == nil {
+			log.Println("Запуск планировщика самообновления (замена ClientUpdater.exe после выхода)...")
+			scheduleSelfUpdate(newExe, myExe)
+		}
+
+		log.Println("Инициализация запуска FiReAgent (-is)...")
+		// Попытка запустить службу
+		if err := runCmdTimeout(exePath, cmdTimeout, "-is"); err != nil {
+			log.Printf("КРИТИЧЕСКАЯ ОШИБКА: Не удалось перезапустить FiReAgent: %v", err)
+		} else {
+			log.Printf("FiReAgent успешно запущен (-is).")
+		}
+
+		// Проверка и запуск службы AgentMon
+		ensureAgentMonRunning()
+
+		// Удаление tmp папки в самом конце
+		time.Sleep(200 * time.Millisecond)
+		if err := removeTmpDir(tmpDir); err != nil {
+			log.Printf("Предупреждение: не удалось удалить tmp в конце работы: %v", err)
+		}
+	}()
+
 	// Читает историю обновлений для определения локальной (текущей) версии
 	hist, err := readUpdateHistory(conf.UpdateDir)
 	if err != nil {
@@ -168,40 +204,12 @@ func run(conf UpdaterConf) error {
 		log.Printf("  %d. Версия %s (от %s)", i+1, u.RemoteVersion, u.Repo)
 	}
 
-	// Определяет путь к FiReAgent
-	exePath := filepath.Join(baseDir, exeName)
-
 	// ЭТАП 1: Остановка службы (Один раз перед всеми обновлениями)
 	if err := runCmdTimeout(exePath, cmdTimeout, "-sd"); err != nil {
 		log.Printf("Предупреждение: FiReAgent -sd завершился с ошибкой (возможно, служба не установлена): %v", err)
 	} else {
 		log.Printf("FiReAgent остановлен и служба удалена.")
 	}
-
-	// Запуск FiReAgent в конце работы (или при ошибке) и обработка самообновления
-	defer func() {
-		// Проверяет наличие файла самообновления и запускает планировщик при любом исходе
-		myExe, _ := os.Executable()
-		newExe := strings.TrimSuffix(myExe, ".exe") + "_new.exe"
-		if _, statErr := os.Stat(newExe); statErr == nil {
-			log.Println("Запуск планировщика самообновления (замена ClientUpdater.exe после выхода)...")
-			scheduleSelfUpdate(newExe, myExe)
-		}
-
-		log.Println("Инициализация запуска FiReAgent (-is)...")
-		// Попытка запустить службу
-		if err := runCmdTimeout(exePath, cmdTimeout, "-is"); err != nil {
-			log.Printf("КРИТИЧЕСКАЯ ОШИБКА: Не удалось перезапустить FiReAgent: %v", err)
-		} else {
-			log.Printf("FiReAgent успешно запущен (-is).")
-		}
-
-		// Удаление tmp папки в самом конце
-		time.Sleep(200 * time.Millisecond)
-		if err := removeTmpDir(tmpDir); err != nil {
-			log.Printf("Предупреждение: не удалось удалить tmp в конце работы: %v", err)
-		}
-	}()
 
 	// ЭТАП 2: Поэтапная установка версий
 	for i, meta := range updates {
@@ -579,4 +587,57 @@ func findUpdateRoot(extractDir string) (string, error) {
 	}
 
 	return "", fmt.Errorf("update.toml не найден в %s и его подпапках", extractDir)
+}
+
+// -------------------------------------------------------------
+// Проверка и запуск службы AgentMon
+// -------------------------------------------------------------
+
+// isServiceRunning проверяет, запущена ли указанная служба Windows
+func isServiceRunning(serviceName string) bool {
+	m, err := mgr.Connect()
+	if err != nil {
+		return false
+	}
+	defer m.Disconnect()
+
+	s, err := m.OpenService(serviceName)
+	if err != nil {
+		return false // Служба не существует или нет доступа
+	}
+	defer s.Close()
+
+	status, err := s.Query()
+	if err != nil {
+		return false
+	}
+
+	return status.State == svc.Running
+}
+
+// ensureAgentMonRunning проверяет, запущена ли служба AgentMon, и запускает её при необходимости
+func ensureAgentMonRunning() {
+	// Проверяет, запущена ли служба AgentMon
+	if isServiceRunning(agentMonServiceName) {
+		log.Printf("Служба %s уже запущена.", agentMonServiceName)
+		return
+	}
+
+	log.Printf("Служба %s не запущена, попытка запуска...", agentMonServiceName)
+
+	// Путь к исполняемому файлу AgentMon
+	agentMonPath := filepath.Join(baseDir, agentMonExeName)
+
+	// Проверяет существование файла
+	if _, err := os.Stat(agentMonPath); os.IsNotExist(err) {
+		log.Printf("Предупреждение: %s не найден: %s", agentMonExeName, agentMonPath)
+		return
+	}
+
+	// Запускает AgentMon с ключом -is
+	if err := runCmdTimeout(agentMonPath, cmdTimeout, "-is"); err != nil {
+		log.Printf("Предупреждение: не удалось запустить %s: %v", agentMonServiceName, err)
+	} else {
+		log.Printf("Служба %s успешно запущена (-is).", agentMonServiceName)
+	}
 }

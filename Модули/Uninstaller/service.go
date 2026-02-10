@@ -151,3 +151,61 @@ func queryServiceState(name string) (exists bool, state uint32, err error) {
 	// Возвращает флаг, состояние и nil
 	return true, status.dwCurrentState, nil
 }
+
+// stopAndDeleteAgentMonViaExe запускает "AgentMon.exe -sd", чтобы остановить и удалить службу AgentMon
+func stopAndDeleteAgentMonViaExe(exeDir string) error {
+	agentMonExe := filepath.Join(exeDir, "AgentMon.exe")
+	if _, err := os.Stat(agentMonExe); err != nil {
+		fmt.Println("AgentMon.exe не найден в текущей папке, пропуск запуска с ключом '-sd'")
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Ограничение выполнения "AgentMon.exe -sd" 30 секундами
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, agentMonExe, "-sd") // Запуск с ключом -sd
+	cmd.Dir = exeDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true} // Скрыть окно
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		fmt.Println("Таймаут выполнения \"AgentMon.exe -sd\"")
+		return errors.New("таймаут выполнения AgentMon.exe -sd")
+	}
+	if err != nil {
+		fmt.Println("Ошибка при выполнении \"AgentMon.exe -sd\":", err)
+	}
+	return err
+}
+
+// waitAgentMonExit ожидает завершения процесса AgentMon.exe (до 30 секунд)
+func waitAgentMonExit(agentMonExe string) {
+	const maxWait = 30 * time.Second
+	deadline := time.Now().Add(maxWait)
+
+	for time.Now().Before(deadline) {
+		pids := findPIDsByPath(agentMonExe)
+		if len(pids) == 0 {
+			fmt.Println("AgentMon.exe завершился.")
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// Таймаут — принудительное завершение
+	pids := findPIDsByPath(agentMonExe)
+	if len(pids) == 0 {
+		fmt.Println("AgentMon.exe завершился.")
+		return
+	}
+	fmt.Printf("Таймаут ожидания AgentMon — принудительное завершение: %v\n", pids)
+	for _, pid := range pids {
+		if terminatePID(pid) {
+			fmt.Printf("  Завершен PID %d\n", pid)
+		} else {
+			fmt.Printf("  Не удалось завершить PID %d\n", pid)
+		}
+	}
+}

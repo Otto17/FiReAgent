@@ -18,7 +18,7 @@ import (
 const (
 	// Данные для "Удаление или изменение программы" (Установленные приложения)
 	publisher      = "Otto"     // Автор
-	CurrentVersion = "02.02.26" // Текущая версия InstFiReAgent в формате "дд.мм.гг"
+	CurrentVersion = "10.02.26" // Текущая версия InstFiReAgent в формате "дд.мм.гг"
 )
 
 func main() {
@@ -128,7 +128,7 @@ func main() {
 	}
 
 	// Запускает FiReAgent.exe с ключом -is для установки и старта службы
-	fmt.Println(ColorOrange + "Запуск службы..." + ColorReset)
+	fmt.Println(ColorOrange + "Запуск службы FiReAgent..." + ColorReset)
 	fiReAgentExe := filepath.Join(targetDir, "FiReAgent.exe")
 	cmd := exec.Command(fiReAgentExe, "-is")
 	cmd.Dir = targetDir
@@ -137,14 +137,38 @@ func main() {
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, ColorBrightRed+"Предупреждение: не удалось запустить службу:", err, ColorReset)
+		fmt.Fprintln(os.Stderr, ColorBrightRed+"Предупреждение: не удалось запустить службу FiReAgent:", err, ColorReset)
 	}
 
-	// Выводит результат работы службы
+	// Выводит результат работы службы FiReAgent
 	for line := range strings.SplitSeq(strings.TrimSpace(out.String()), "\n") {
 		if strings.TrimSpace(line) != "" {
 			fmt.Println(ColorOrange + strings.TrimSpace(line) + ColorReset)
 		}
+	}
+
+	// Запускает AgentMon.exe с ключом -is для установки и старта службы мониторинга
+	fmt.Println(ColorOrange + "Запуск службы AgentMon..." + ColorReset)
+	agentMonExe := filepath.Join(targetDir, "AgentMon.exe")
+	if _, err := os.Stat(agentMonExe); err == nil {
+		cmdMon := exec.Command(agentMonExe, "-is")
+		cmdMon.Dir = targetDir
+
+		var outMon bytes.Buffer
+		cmdMon.Stdout = &outMon
+		cmdMon.Stderr = &outMon
+		if err := cmdMon.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, ColorBrightRed+"Предупреждение: не удалось запустить службу AgentMon:", err, ColorReset)
+		}
+
+		// Выводит результат работы службы AgentMon
+		for line := range strings.SplitSeq(strings.TrimSpace(outMon.String()), "\n") {
+			if strings.TrimSpace(line) != "" {
+				fmt.Println(ColorOrange + strings.TrimSpace(line) + ColorReset)
+			}
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, ColorBrightYellow+"Предупреждение: AgentMon.exe не найден, пропуск установки службы мониторинга"+ColorReset)
 	}
 
 	// Удаляет временные файлы

@@ -16,7 +16,7 @@ import (
 	"golang.org/x/sys/windows/svc"
 )
 
-const CurrentVersion = "02.02.25" // Текущая версия FiReAgent в формате "дд.мм.гг"
+const CurrentVersion = "10.02.25" // Текущая версия FiReAgent в формате "дд.мм.гг"
 
 func main() {
 	// Устанавливает более агрессивный порог сборщика мусора в 20% (вместо 100% по умолчанию)
